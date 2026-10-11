@@ -1,0 +1,1858 @@
+//@version=6
+indicator("CISD Model+ | Triton Trades", shorttitle = "CISD Model+", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 5000)
+ 
+const string G_GEN      = "General Settings"
+const string G_LIQ      = "Liquidity"
+const string G_SESS     = "Session Liquidity"
+const string G_FVG      = "Fair Value Gaps"
+const string G_CISD     = "CISD Settings"
+const string G_HTFCISD  = "Higher Timeframe CISDs"
+const string G_SMT      = "SMT Settings"
+const string G_RISK     = "Risk & Contract Sizing"
+const string G_ALERT    = "Alert Settings"
+const string G_WM       = "Watermark / Info Box"
+const string G_CHECK    = "Strategy Checklist"
+ 
+const string STY_SOLID  = "Solid"
+const string STY_DASH   = "Dashed"
+const string STY_DOT    = "Dotted"
+ 
+const string TIP_BIAS         = "Neutral shows bullish and bearish setups. Bullish/Bearish filters the model to a single direction."
+const string TIP_HIDEINV      = "Removes every CISD whose stop-loss level has been violated. Keeps the chart clean of false positives."
+const string TIP_SETUPS       = "How many CISD lines are retained per direction."
+const string TIP_MINGRADE     = "Minimum grade required before a CISD is rendered or fires an alert."
+const string TIP_CTFFVG       = "Allows CISDs that deliver from a CURRENT timeframe fair value gap (instead of a liquidity sweep)."
+const string TIP_CTFSWEEP     = "Uses current timeframe swing highs/lows as valid liquidity. Turn off to require HTF liquidity only."
+const string TIP_PROX         = "Suppresses CISDs that form too close (in price) to an existing CISD of the same direction."
+const string TIP_MAXBARS      = "Maximum number of bars allowed between the CISD sequence and the confirmation close."
+const string TIP_SWEEP        = "Marks each swing high/low that gets taken and closed back through."
+const string TIP_PRESERVE     = "Keeps a session level drawn after it has been swept (shown as a sweep)."
+const string TIP_HTFMODE      = "Automatic aligns HTF FVGs to the chart timeframe. Manual lets you pick each timeframe."
+const string TIP_POTENTIAL    = "Draws the CISD level BEFORE it is confirmed, so you can see where price must close."
+const string TIP_DISABLELBL   = "Hides the label on current-timeframe CISDs (HTF CISD labels stay visible)."
+const string TIP_SMTCISD      = "Validates a CISD that did NOT sweep liquidity when SMT exists with the correlated asset."
+const string TIP_SLPLACE      = "Stop loss is placed at the wick or the body of the sequence extreme."
+const string TIP_SIZING       = "Suggests a contract count from $ risk and stop distance on current-TF CISDs."
+const string TIP_HOVER        = "Sizing information is only visible when you hover the CISD label."
+const string TIP_MANHTF       = "Override the automatic higher timeframe selection for the multi-TF CISD engine."
+const string TIP_SENS         = "Sensitive = every SMT. Normal = medium swings. Strict = major swings only."
+const string TIP_RT           = "Plots SMT before the divergence candle closes and trails it in real time."
+const string TIP_ALERTS       = "Master switch. Alerts still respect Bias, Min Grade and the session windows below."
+ 
+const color  C_LONG_DEF  = #2962FF
+const color  C_SHORT_DEF = #F23645
+const color  C_BULL_FVG  = #26A69A
+const color  C_BEAR_FVG  = #EF5350
+ 
+string i_bias           = input.string("Neutral", "Bias", options = ["Neutral", "Bullish", "Bearish"], group = G_GEN, tooltip = TIP_BIAS)
+bool   i_hideInvalid    = input.bool(true, "Hide Invalidated Setups", group = G_GEN, tooltip = TIP_HIDEINV)
+int    i_setupsShown    = input.int(5, "Number of Setups Displayed", minval = 1, maxval = 30, group = G_GEN, tooltip = TIP_SETUPS)
+string i_minGrade       = input.string("C", "Min Grade to Display", options = ["C", "B-", "B+", "A", "A+"], group = G_GEN, tooltip = TIP_MINGRADE)
+bool   i_ctfFvgDeliver  = input.bool(true, "Current Timeframe FVG Delivery", group = G_GEN, tooltip = TIP_CTFFVG)
+bool   i_ctfSweeps      = input.bool(true, "Current Timeframe Liquidity Sweeps", group = G_GEN, tooltip = TIP_CTFSWEEP)
+bool   i_ignoreProx     = input.bool(true, "Ignore Close Proximity CISDs", group = G_GEN, tooltip = TIP_PROX)
+int    i_maxConfirmBars = input.int(15, "Max Bars to Confirm CISD", minval = 1, maxval = 200, group = G_GEN)
+int    i_pivotLen       = 2
+float  i_proxATR        = 0.75
+ 
+string i_liqMode        = input.string("Manual", "Alignment Mode", options = ["Automatic", "Manual"], inline = "LQ0", group = G_LIQ)
+string i_liqTF          = input.timeframe("60", "Timeframe", inline = "LQ0", group = G_LIQ)
+ 
+bool   i_showLiq        = input.bool(false, "Show Liquidity:", inline = "LQ1", group = G_LIQ)
+color  i_buysideCol     = input.color(#26303E, "Buyside", inline = "LQ1", group = G_LIQ)
+color  i_sellsideCol    = input.color(#26303E, "Sellside", inline = "LQ1", group = G_LIQ)
+string i_liqStyle       = input.string(STY_DOT, "Line Style", options = [STY_SOLID, STY_DASH, STY_DOT], inline = "LQ2", group = G_LIQ)
+string i_liqSize        = input.string("Small", "Label Size", options = ["Tiny", "Small", "Normal", "Large"], inline = "LQ2", group = G_LIQ)
+int    i_liqMax         = input.int(2, "Max Liquidity Levels", minval = 1, maxval = 30, inline = "LQ2b", group = G_LIQ)
+ 
+bool   i_showSweeps     = input.bool(false, "Show Liquidity Sweeps", inline = "LQ3", group = G_LIQ, tooltip = TIP_SWEEP)
+color  i_sweepCol       = input.color(color.new(#787B86, 35), "", inline = "LQ3", group = G_LIQ)
+string i_sweepText      = input.string("$$$", "", inline = "LQ3", group = G_LIQ)
+string i_sweepStyle     = input.string(STY_DOT, "Sweep Line Style", options = [STY_SOLID, STY_DASH, STY_DOT], inline = "LQ4", group = G_LIQ)
+string i_sweepSize      = input.string("Tiny", "Label Size", options = ["Tiny", "Small", "Normal", "Large"], inline = "LQ4", group = G_LIQ)
+int    i_sweepMax       = input.int(2, "Max Sweeps Displayed", minval = 1, maxval = 50, inline = "LQ4b", group = G_LIQ)
+ 
+bool   i_showSession    = input.bool(true, "Show Session Liquidity", inline = "SS0", group = G_SESS)
+bool   i_preserveSweep  = input.bool(true, "Preserve After Sweep", inline = "SS0", group = G_SESS, tooltip = TIP_PRESERVE)
+string i_sessStyle      = input.string(STY_DOT, "Session Line Style", options = [STY_SOLID, STY_DASH, STY_DOT], inline = "SS1", group = G_SESS)
+string i_sessSize       = input.string("Small", "Session Label Size", options = ["Tiny", "Small", "Normal", "Large"], inline = "SS1", group = G_SESS)
+ 
+bool   i_asiaOn         = input.bool(true, "Asia", inline = "SS2", group = G_SESS)
+color  i_asiaCol        = input.color(#26303E, "", inline = "SS2", group = G_SESS)
+string i_asiaStart      = input.session("2000-0000", "", inline = "SS2", group = G_SESS)
+ 
+bool   i_londonOn       = input.bool(true, "London", inline = "SS3", group = G_SESS)
+color  i_londonCol      = input.color(#26303E, "", inline = "SS3", group = G_SESS)
+string i_londonStart    = input.session("0200-0500", "", inline = "SS3", group = G_SESS)
+ 
+bool   i_pdhpdl         = input.bool(true, "PDH/PDL   PDH", inline = "SS5", group = G_SESS)
+color  i_pdhCol         = input.color(#26303E, "", inline = "SS5", group = G_SESS)
+color  i_pdlCol         = input.color(#26303E, "PDL", inline = "SS5", group = G_SESS)
+ 
+bool   i_pwhpwl         = input.bool(true, "PWH/PWL   PWH", inline = "SS6", group = G_SESS)
+color  i_pwhCol         = input.color(#26303E, "", inline = "SS6", group = G_SESS)
+color  i_pwlCol         = input.color(#26303E, "PWL", inline = "SS6", group = G_SESS)
+ 
+int    i_sessExtend     = input.int(40, "Level Extension (bars)", minval = 5, maxval = 200, group = G_SESS)
+ 
+bool   i_showHtfFvg     = input.bool(true, "Show HTF FVGs", inline = "FV0", group = G_FVG)
+bool   i_fvgBorder      = input.bool(false, "Show Border", inline = "FV0", group = G_FVG)
+int    i_fvgPerSide     = input.int(1, "Number of FVGs Displayed Per Side", minval = 1, maxval = 10, group = G_FVG)
+string i_htfMode        = input.string("Automatic", "HTF Timeframe Mode", options = ["Automatic", "Manual"], group = G_FVG, tooltip = TIP_HTFMODE)
+int    i_manualHTFs     = input.int(3, "Manual HTFs", minval = 1, maxval = 3, group = G_FVG)
+string i_tf1            = input.timeframe("60", "TF 1", inline = "FV1", group = G_FVG)
+string i_tf2            = input.timeframe("240", "TF 2", inline = "FV1", group = G_FVG)
+string i_tf3            = input.timeframe("D", "TF 3", inline = "FV1", group = G_FVG)
+color  i_fvgLblCol      = input.color(#26303E, "Label Color", inline = "FV2", group = G_FVG)
+string i_fvgLblSize     = input.string("Tiny", "Label Size", options = ["Tiny", "Small", "Normal", "Large"], inline = "FV2", group = G_FVG)
+color  i_fvgBullCol     = input.color(color.new(#9c9c9c, 88), "Bullish Color", inline = "FV3", group = G_FVG)
+color  i_fvgBearCol     = input.color(color.new(#9c9c9c, 88), "Bearish Color", inline = "FV3", group = G_FVG)
+bool   i_fvgMitigate    = true
+ 
+bool   i_showCISD       = input.bool(true, "Show CISD", group = G_CISD)
+bool   i_showPotential  = input.bool(true, "Show Potential Current-TF CISDs", group = G_CISD, tooltip = TIP_POTENTIAL)
+bool   i_disableCtfLbl  = input.bool(false, "Disable Current TF Labels", group = G_CISD, tooltip = TIP_DISABLELBL)
+bool   i_cisdFromSMT    = input.bool(true, "Detect CISDs from SMTs", group = G_CISD, tooltip = TIP_SMTCISD)
+color  i_longCol        = input.color(C_LONG_DEF, "Long Color", inline = "CS1", group = G_CISD)
+color  i_shortCol       = input.color(C_SHORT_DEF, "Short Color", inline = "CS1", group = G_CISD)
+string i_cisdLblSize    = input.string("Tiny", "Label Size", options = ["Tiny", "Small", "Normal", "Large"], inline = "CS1", group = G_CISD)
+int    i_cisdWidth      = input.int(1, "Line Width", minval = 1, maxval = 5, inline = "CS2", group = G_CISD)
+int    i_cisdExtend     = input.int(16, "CISD Line Extension (bars)", minval = 1, maxval = 200, inline = "CS2", group = G_CISD)
+int    i_minSeqLen      = 1
+int    i_maxSeqLen      = 12
+ 
+bool   i_showSL         = input.bool(true, "Show Stop Loss", inline = "RK0", group = G_CISD)
+string i_slPlacement    = input.string("Wick", "Placement", options = ["Wick", "Body"], inline = "RK0", group = G_CISD, tooltip = TIP_SLPLACE)
+color  i_slCol          = #26303E
+string i_slStyle        = STY_DOT
+int    i_slExtendBars   = input.int(4, "Stop Loss Line Extension (bars)", minval = 1, maxval = 100, group = G_CISD)
+bool   i_sizingOn       = input.bool(true, "Contract Sizing   Risk ($)", inline = "RK2", group = G_CISD, tooltip = TIP_SIZING)
+float  i_riskUSD        = input.float(2000, "", minval = 1, inline = "RK2", group = G_CISD)
+bool   i_hoverOnly      = input.bool(true, "Sizing on Hover Only", group = G_CISD, tooltip = TIP_HOVER)
+bool   i_showTarget     = true
+int    i_tgtExtendBars  = 15
+float  i_minRR          = 1.5
+ 
+bool   i_showHtfCISD    = input.bool(false, "Show Higher Timeframe CISDs", group = G_HTFCISD)
+bool   i_htfPotential   = input.bool(false, "Show Potential CISDs", inline = "HC0", group = G_HTFCISD)
+string i_htfCisdStyle   = input.string(STY_DOT, "", options = [STY_SOLID, STY_DASH, STY_DOT], inline = "HC0", group = G_HTFCISD)
+bool   i_manualHtfCISD  = input.bool(false, "Manual Higher Timeframe Selection", group = G_HTFCISD, tooltip = TIP_MANHTF)
+string i_htfCisd1       = input.timeframe("2", "Higher Timeframe 1", inline = "HC1", group = G_HTFCISD)
+string i_htfCisd2       = input.timeframe("3", "Higher Timeframe 2", inline = "HC1", group = G_HTFCISD)
+float  i_mergeTolATR    = 0.15
+ 
+bool   i_showSMT        = input.bool(true, "Show SMT Divergences", group = G_SMT)
+bool   i_autoPair       = input.bool(true, "Automatic Correlated Asset", inline = "SM0", group = G_SMT)
+string i_manualPair     = input.symbol("CME_MINI:ES1!", "", inline = "SM0", group = G_SMT)
+string i_smtSens        = input.string("Normal", "Sensitivity", options = ["Sensitive", "Normal", "Strict"], group = G_SMT, tooltip = TIP_SENS)
+bool   i_smtRealtime    = input.bool(false, "Real-time SMTs", group = G_SMT, tooltip = TIP_RT)
+int    i_smtMax         = input.int(3, "Max SMTs Displayed", minval = 1, maxval = 20, group = G_SMT)
+color  i_smtBullCol     = input.color(C_LONG_DEF, "Bullish:", inline = "SM1", group = G_SMT)
+string i_smtBullWidth   = input.string("Thin", "", options = ["Thin", "Medium", "Thick"], inline = "SM1", group = G_SMT)
+string i_smtBullStyle   = input.string(STY_DOT, "", options = [STY_SOLID, STY_DASH, STY_DOT], inline = "SM1", group = G_SMT)
+color  i_smtBearCol     = input.color(C_SHORT_DEF, "Bearish:", inline = "SM2", group = G_SMT)
+string i_smtBearWidth   = input.string("Thin", "", options = ["Thin", "Medium", "Thick"], inline = "SM2", group = G_SMT)
+string i_smtBearStyle   = input.string(STY_DOT, "", options = [STY_SOLID, STY_DASH, STY_DOT], inline = "SM2", group = G_SMT)
+bool   i_smtLabel       = input.bool(true, "Label", inline = "SM3", group = G_SMT)
+color  i_smtLblCol      = input.color(#26303E, "", inline = "SM3", group = G_SMT)
+string i_smtLblSize     = input.string("Tiny", "Size", options = ["Tiny", "Small", "Normal", "Large"], inline = "SM3", group = G_SMT)
+bool   i_smtSymbol      = input.bool(true, "Show symbol", inline = "SM3", group = G_SMT)
+int    i_smtLookback    = input.int(6, "SMT Lookback (bars)", minval = 1, maxval = 50, group = G_SMT)
+ 
+bool   i_alertsOn       = input.bool(true, "Enable Alerts", group = G_ALERT, tooltip = TIP_ALERTS)
+bool   i_alertS1        = input.bool(true, "Session 1", inline = "AL1", group = G_ALERT)
+string i_alertS1Win     = input.session("0600-1600", "", inline = "AL1", group = G_ALERT)
+bool   i_alertS2        = input.bool(false, "Session 2", inline = "AL2", group = G_ALERT)
+string i_alertS2Win     = input.session("2000-0000", "", inline = "AL2", group = G_ALERT)
+bool   i_alertS3        = input.bool(false, "Session 3", inline = "AL3", group = G_ALERT)
+string i_alertS3Win     = input.session("0200-0500", "", inline = "AL3", group = G_ALERT)
+bool   i_alertConfirmed = input.bool(true, "Confirmed CISD", inline = "AL4", group = G_ALERT)
+string i_msgConfirmed   = input.string("CISD confirmed", "", inline = "AL4", group = G_ALERT)
+bool   i_alertPotential = input.bool(false, "Potential CISD", inline = "AL5", group = G_ALERT)
+string i_msgPotential   = input.string("Potential CISD", "", inline = "AL5", group = G_ALERT)
+bool   i_alertHTF       = input.bool(false, "HTF CISD", inline = "AL6", group = G_ALERT)
+string i_msgHTF         = input.string("HTF CISD detected", "", inline = "AL6", group = G_ALERT)
+bool   i_alertSweep     = false
+string i_msgSweep       = "Liquidity swept"
+bool   i_alertSMT       = false
+string i_msgSMT         = "SMT divergence"
+ 
+bool   i_showInfoBox    = input.bool(true, "Show Info Box", group = G_WM)
+color  i_wmTextCol      = input.color(color.new(#787B86, 35), "Text Color", group = G_WM)
+string i_wmSite         = input.string("cisdmodel.com", "Site Text", group = G_WM)
+string i_wmLine1        = input.string("CISD Model+ | Triton Trades", "Line 1 Text", group = G_WM)
+bool   i_wmShowDate     = true
+string i_wmPos          = "Bottom Center"
+ 
+bool   i_showChecklist  = input.bool(true, "Show Strategy Checklist", inline = "CK0", group = G_CHECK)
+bool   i_showGrade      = input.bool(true, "Show Setup Grade", inline = "CK0", group = G_CHECK)
+string i_tblSize        = input.string("Small", "Table Text Size", options = ["Tiny", "Small", "Normal", "Large"], inline = "CK1", group = G_CHECK)
+color  i_cellCol        = input.color(color.new(#b2b5be, 75), "Cell Normal", inline = "CK1", group = G_CHECK)
+color  i_hdrBg          = input.color(#434651, "Header Background", inline = "CK2", group = G_CHECK)
+color  i_hdrTxt         = input.color(#e0e3eb, "Header Text", inline = "CK2", group = G_CHECK)
+bool   i_ckTintRows     = false
+color  i_ckPassCol      = color.new(#089981, 78)
+color  i_ckFailCol      = color.new(#F23645, 82)
+string i_tblPos         = input.string("Bottom Right", "Checklist Position", options = ["Top Left", "Top Right", "Middle Right", "Bottom Left", "Bottom Right"], group = G_CHECK)
+bool   i_ckSweep        = input.bool(true, "Liquidity Sweep", inline = "CK3", group = G_CHECK)
+bool   i_ckPDA          = input.bool(true, "HTF PDA Delivery", inline = "CK3", group = G_CHECK)
+bool   i_ckVolume       = input.bool(true, "Volume", inline = "CK4", group = G_CHECK)
+bool   i_ckSession      = input.bool(true, "Session Sweep", inline = "CK4", group = G_CHECK)
+bool   i_ckTargets      = input.bool(true, "Clear Targets", inline = "CK5", group = G_CHECK)
+bool   i_ckSMT          = input.bool(true, "SMT", inline = "CK5", group = G_CHECK)
+float  i_volMult        = 1.2
+ 
+lineStyle(string s) =>
+    switch s
+        STY_SOLID => line.style_solid
+        STY_DASH  => line.style_dashed
+        STY_DOT   => line.style_dotted
+        => line.style_solid
+ 
+txtSize(string s) =>
+    switch s
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        "Huge"   => size.huge
+        => size.small
+ 
+widthOf(string s) =>
+    switch s
+        "Thin"   => 1
+        "Medium" => 2
+        "Thick"  => 3
+        => 1
+ 
+tblPosOf(string s) =>
+    switch s
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Top Right"     => position.top_right
+        "Middle Center" => position.middle_center
+        "Middle Right"  => position.middle_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        "Bottom Right"  => position.bottom_right
+        => position.bottom_right
+ 
+gradeText(int g) =>
+    switch g
+        7 => "A+"
+        6 => "A"
+        5 => "B+"
+        4 => "B-"
+        3 => "C"
+        => "-"
+ 
+gradeRank(string g) =>
+    switch g
+        "A+" => 7
+        "A"  => 6
+        "B+" => 5
+        "B-" => 4
+        "C"  => 3
+        => 0
+ 
+gradeColor(int g) =>
+    switch g
+        7 => color.new(#00C853, 0)
+        6 => color.new(#64DD17, 0)
+        5 => color.new(#9ACD32, 0)
+        4 => color.new(#FFB300, 0)
+        3 => color.new(#FF7043, 0)
+        => color.new(#787B86, 0)
+ 
+tfLabel(string tf) =>
+    string res = tf
+    if str.contains(tf, "S")
+        res := "S" + str.replace_all(tf, "S", "")
+    else if tf == "D" or tf == "1D"
+        res := "D1"
+    else if tf == "W" or tf == "1W"
+        res := "W1"
+    else if tf == "M" or tf == "1M"
+        res := "MN"
+    else
+        int mins = na(str.tonumber(tf)) ? na : int(str.tonumber(tf))
+        if na(mins)
+            res := tf
+        else if mins >= 60 and mins % 60 == 0
+            res := "H" + str.tostring(mins / 60)
+        else
+            res := "M" + str.tostring(mins)
+    res
+ 
+int TF_SEC = timeframe.in_seconds(timeframe.period)
+ 
+autoFvgTF1() =>
+    string r = "60"
+    if TF_SEC <= 60
+        r := "15"
+    else if TF_SEC <= 300
+        r := "60"
+    else if TF_SEC <= 900
+        r := "240"
+    else if TF_SEC <= 3600
+        r := "D"
+    else
+        r := "W"
+    r
+ 
+autoFvgTF2() =>
+    string r = "240"
+    if TF_SEC <= 60
+        r := "60"
+    else if TF_SEC <= 300
+        r := "240"
+    else if TF_SEC <= 900
+        r := "D"
+    else if TF_SEC <= 3600
+        r := "W"
+    else
+        r := "M"
+    r
+ 
+autoFvgTF3() =>
+    string r = "D"
+    if TF_SEC <= 300
+        r := "D"
+    else if TF_SEC <= 3600
+        r := "W"
+    else
+        r := "M"
+    r
+ 
+autoCisdTF1() =>
+    string r = "5"
+    if TF_SEC <= 60
+        r := "2"
+    else if TF_SEC <= 120
+        r := "3"
+    else if TF_SEC <= 180
+        r := "5"
+    else if TF_SEC <= 300
+        r := "15"
+    else if TF_SEC <= 900
+        r := "60"
+    else if TF_SEC <= 3600
+        r := "240"
+    else
+        r := "D"
+    r
+ 
+autoCisdTF2() =>
+    string r = "15"
+    if TF_SEC <= 60
+        r := "3"
+    else if TF_SEC <= 120
+        r := "5"
+    else if TF_SEC <= 180
+        r := "15"
+    else if TF_SEC <= 300
+        r := "30"
+    else if TF_SEC <= 900
+        r := "240"
+    else if TF_SEC <= 3600
+        r := "D"
+    else
+        r := "W"
+    r
+ 
+autoLiqTF() =>
+    string r = "60"
+    if TF_SEC <= 60
+        r := "15"
+    else if TF_SEC <= 300
+        r := "60"
+    else
+        r := "240"
+    r
+ 
+string FVG_TF1 = i_htfMode == "Automatic" ? autoFvgTF1() : i_tf1
+string FVG_TF2 = i_htfMode == "Automatic" ? autoFvgTF2() : i_tf2
+string FVG_TF3 = i_htfMode == "Automatic" ? autoFvgTF3() : i_tf3
+string HC_TF1  = i_manualHtfCISD ? i_htfCisd1 : autoCisdTF1()
+string HC_TF2  = i_manualHtfCISD ? i_htfCisd2 : autoCisdTF2()
+string LIQ_TF  = i_liqMode == "Automatic" ? autoLiqTF() : i_liqTF
+ 
+resolvePair() =>
+    string sym = i_manualPair
+    if i_autoPair
+        string root = syminfo.ticker
+        string mapped = switch root
+            "ES1!"    => "NQ1!"
+            "NQ1!"    => "ES1!"
+            "YM1!"    => "ES1!"
+            "RTY1!"   => "ES1!"
+            "GC1!"    => "SI1!"
+            "SI1!"    => "GC1!"
+            "CL1!"    => "RB1!"
+            "RB1!"    => "CL1!"
+            "6E1!"    => "6B1!"
+            "6B1!"    => "6E1!"
+            "6A1!"    => "6N1!"
+            "6N1!"    => "6A1!"
+            "BTC1!"   => "ETH1!"
+            "ETH1!"   => "BTC1!"
+            "BTCUSD"  => "ETHUSD"
+            "ETHUSD"  => "BTCUSD"
+            "BTCUSDT" => "ETHUSDT"
+            "ETHUSDT" => "BTCUSDT"
+            "USDJPY"  => "DXY"
+            "USDCHF"  => "DXY"
+            "USDCAD"  => "DXY"
+            "DXY"     => "USDJPY"
+            "EURUSD"  => "GBPUSD"
+            "GBPUSD"  => "EURUSD"
+            "AUDUSD"  => "NZDUSD"
+            "NZDUSD"  => "AUDUSD"
+            "AUDCAD"  => "NZDCAD"
+            "NZDCAD"  => "AUDCAD"
+            "EURCAD"  => "GBPCAD"
+            "GBPCAD"  => "EURCAD"
+            "EURAUD"  => "GBPAUD"
+            "GBPAUD"  => "EURAUD"
+            "EURNZD"  => "GBPNZD"
+            "GBPNZD"  => "EURNZD"
+            "EURJPY"  => "GBPJPY"
+            "GBPJPY"  => "EURJPY"
+            "AUDJPY"  => "NZDJPY"
+            "NZDJPY"  => "AUDJPY"
+            "XAUUSD"  => "XAGUSD"
+            "XAGUSD"  => "XAUUSD"
+            => ""
+        if mapped != ""
+            sym := syminfo.prefix + ":" + mapped
+        else
+            sym := i_manualPair
+    sym
+ 
+string SMT_SYMBOL = resolvePair()
+string SMT_SHORT  = str.replace_all(str.substring(SMT_SYMBOL, na(str.pos(SMT_SYMBOL, ":")) ? 0 : str.pos(SMT_SYMBOL, ":") + 1), "1!", "")
+ 
+type Liq
+    float price
+    int   bar
+    bool  buyside
+    bool  swept
+    line  ln
+    label lb
+ 
+type Sweep
+    float price
+    int   bar
+    bool  buyside
+    line  ln
+    label lb
+ 
+type Fvg
+    float top
+    float bot
+    int   bar
+    bool  bull
+    bool  mitigated
+    string tf
+    box   bx
+    label lb
+ 
+type Cisd
+    float level
+    float extreme
+    float bodyExtreme
+    int   startBar
+    int   endBar
+    int   slBar
+    int   confirmBar
+    bool  bull
+    bool  confirmed
+    bool  invalidated
+    bool  potential
+    string tf
+    int   grade
+    bool  ckSweep
+    bool  ckPDA
+    bool  ckVol
+    bool  ckSession
+    bool  ckTargets
+    bool  ckSMT
+    float target
+    int   contracts
+    float slPrice
+    line  ln
+    line  slLn
+    label lb
+    label slLb
+ 
+type Smt
+    int   bar1
+    int   bar2
+    float p1
+    float p2
+    bool  bull
+    line  ln
+    label lb
+ 
+type SessLvl
+    string name
+    float  price
+    int    bar
+    bool   high
+    bool   swept
+    line   ln
+    label  lb
+    int    sweptTime
+ 
+var array<Liq>     liqBuy     = array.new<Liq>()
+var array<Liq>     liqSell    = array.new<Liq>()
+var array<Sweep>   sweeps     = array.new<Sweep>()
+var array<Fvg>     fvgs       = array.new<Fvg>()
+var array<Cisd>    cisdBull   = array.new<Cisd>()
+var array<Cisd>    cisdBear   = array.new<Cisd>()
+var array<Cisd>    cisdHtf    = array.new<Cisd>()
+var array<Smt>     smts       = array.new<Smt>()
+var array<SessLvl> sessLvls   = array.new<SessLvl>()
+ 
+var float lastGradeBull = 0.0
+var float lastGradeBear = 0.0
+var int   lastGradeVal  = 0
+var bool  lastGradeIsBull = true
+ 
+var array<int> g_barTimes = array.new<int>()
+array.push(g_barTimes, int(time))
+ 
+findBarIndexByTime(int t) =>
+    int lo = 0
+    int hi = array.size(g_barTimes) - 1
+    int result = 0
+    while lo <= hi
+        int mid = math.floor((lo + hi) / 2.0)
+        int midTime = array.get(g_barTimes, mid)
+        if midTime <= t
+            result := mid
+            lo := mid + 1
+        else
+            hi := mid - 1
+    result
+ 
+float atr = ta.atr(14)
+float volSMA = ta.sma(volume, 20)
+bool  volSpike = not na(volSMA) and volume > volSMA * i_volMult
+ 
+bool biasAllowsLong  = i_bias != "Bearish"
+bool biasAllowsShort = i_bias != "Bullish"
+ 
+float ph = ta.pivothigh(high, i_pivotLen, i_pivotLen)
+float pl = ta.pivotlow(low, i_pivotLen, i_pivotLen)
+ 
+int smtLen = switch i_smtSens
+    "Sensitive" => 2
+    "Normal"    => 5
+    "Strict"    => 10
+    => 5
+ 
+float smtPh = ta.pivothigh(high, smtLen, smtLen)
+float smtPl = ta.pivotlow(low, smtLen, smtLen)
+ 
+[cmpHigh, cmpLow, cmpClose, cmpOpen] = request.security(SMT_SYMBOL, timeframe.period, [high, low, close, open], barmerge.gaps_off, barmerge.lookahead_off)
+ 
+float cmpPh = ta.pivothigh(cmpHigh, smtLen, smtLen)
+float cmpPl = ta.pivotlow(cmpLow, smtLen, smtLen)
+ 
+pruneLiq(array<Liq> arr, int maxN) =>
+    while array.size(arr) > maxN
+        Liq old = array.shift(arr)
+        if not na(old.ln)
+            line.delete(old.ln)
+        if not na(old.lb)
+            label.delete(old.lb)
+ 
+addLiq(bool buyside, float price, int bar) =>
+    Liq l = Liq.new(price, bar, buyside, false, na, na)
+    if i_showLiq
+        l.ln := line.new(bar, price, bar_index, price, xloc = xloc.bar_index, color = buyside ? i_buysideCol : i_sellsideCol, style = lineStyle(i_liqStyle), width = 1)
+        l.lb := label.new(bar_index, price, buyside ? "BSL" : "SSL", xloc = xloc.bar_index, style = buyside ? label.style_label_down : label.style_label_up, color = color.new(color.white, 100), textcolor = buyside ? i_buysideCol : i_sellsideCol, size = txtSize(i_liqSize))
+    array.push(buyside ? liqBuy : liqSell, l)
+    pruneLiq(buyside ? liqBuy : liqSell, i_liqMax)
+ 
+if not na(ph)
+    addLiq(true, ph, bar_index - i_pivotLen)
+ 
+if not na(pl)
+    addLiq(false, pl, bar_index - i_pivotLen)
+ 
+extendLiqArray(array<Liq> arr) =>
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            Liq l = array.get(arr, i)
+            if not l.swept and not na(l.ln)
+                line.set_x2(l.ln, bar_index + 3)
+                if not na(l.lb)
+                    label.set_x(l.lb, bar_index + 3)
+ 
+if i_showLiq and barstate.islast
+    extendLiqArray(liqBuy)
+    extendLiqArray(liqSell)
+ 
+pruneSweeps() =>
+    while array.size(sweeps) > i_sweepMax
+        Sweep s = array.shift(sweeps)
+        if not na(s.ln)
+            line.delete(s.ln)
+        if not na(s.lb)
+            label.delete(s.lb)
+ 
+var bool sweptBuyNow  = false
+var bool sweptSellNow = false
+var int  lastSweepBuyBar  = -10000
+var int  lastSweepSellBar = -10000
+var float lastSweepBuyPx  = na
+var float lastSweepSellPx = na
+ 
+sweptBuyNow  := false
+sweptSellNow := false
+ 
+if array.size(liqBuy) > 0
+    for i = array.size(liqBuy) - 1 to 0
+        Liq l = array.get(liqBuy, i)
+        if not l.swept and high > l.price and close < l.price
+            l.swept := true
+            sweptBuyNow := true
+            lastSweepBuyBar := bar_index
+            lastSweepBuyPx  := l.price
+            if i_showSweeps
+                Sweep s = Sweep.new(l.price, bar_index, true, na, na)
+                s.ln := line.new(l.bar, l.price, bar_index, l.price, xloc = xloc.bar_index, color = i_sweepCol, style = lineStyle(i_sweepStyle), width = 1)
+                s.lb := label.new(bar_index, l.price, i_sweepText, xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.white, 100), textcolor = i_sweepCol, size = txtSize(i_sweepSize))
+                array.push(sweeps, s)
+                pruneSweeps()
+ 
+if array.size(liqSell) > 0
+    for i = array.size(liqSell) - 1 to 0
+        Liq l = array.get(liqSell, i)
+        if not l.swept and low < l.price and close > l.price
+            l.swept := true
+            sweptSellNow := true
+            lastSweepSellBar := bar_index
+            lastSweepSellPx  := l.price
+            if i_showSweeps
+                Sweep s = Sweep.new(l.price, bar_index, false, na, na)
+                s.ln := line.new(l.bar, l.price, bar_index, l.price, xloc = xloc.bar_index, color = i_sweepCol, style = lineStyle(i_sweepStyle), width = 1)
+                s.lb := label.new(bar_index, l.price, i_sweepText, xloc = xloc.bar_index, style = label.style_label_up, color = color.new(color.white, 100), textcolor = i_sweepCol, size = txtSize(i_sweepSize))
+                array.push(sweeps, s)
+                pruneSweeps()
+ 
+[htfPh, htfPl] = request.security(syminfo.tickerid, LIQ_TF, [ta.pivothigh(high, 2, 2), ta.pivotlow(low, 2, 2)], barmerge.gaps_off, barmerge.lookahead_off)
+ 
+var float htfBSL = na
+var float htfSSL = na
+var int   htfSweepBuyBar  = -10000
+var int   htfSweepSellBar = -10000
+ 
+if not na(htfPh) and htfPh != htfPh[1]
+    htfBSL := htfPh
+if not na(htfPl) and htfPl != htfPl[1]
+    htfSSL := htfPl
+ 
+if not na(htfBSL) and high > htfBSL and close < htfBSL
+    htfSweepBuyBar := bar_index
+if not na(htfSSL) and low < htfSSL and close > htfSSL
+    htfSweepSellBar := bar_index
+ 
+string TZ = "America/New_York"
+ 
+bool inAsia   = not na(time(timeframe.period, i_asiaStart, TZ))
+bool inLondon = not na(time(timeframe.period, i_londonStart, TZ))
+ 
+var float asiaH = na
+var float asiaL = na
+var int asiaHb = na
+var int asiaLb = na
+var float lonH  = na
+var float lonL  = na
+var int lonHb  = na
+var int lonLb  = na
+ 
+dateTag() =>
+    str.tostring(month(time, TZ)) + "/" + str.tostring(dayofmonth(time, TZ))
+ 
+pushSess(string nm, float px, int bar, bool isHigh, color col) =>
+    if i_showSession and not na(px)
+        SessLvl s = SessLvl.new(nm, px, bar, isHigh, false, na, na, na)
+        s.ln := line.new(bar, px, bar_index + i_sessExtend, px, xloc = xloc.bar_index, color = col, style = lineStyle(i_sessStyle), width = 1)
+        s.lb := label.new(bar_index + i_sessExtend - 4, px, nm, xloc = xloc.bar_index, style = isHigh ? label.style_label_down : label.style_label_up, color = color.new(color.white, 100), textcolor = col, size = txtSize(i_sessSize))
+        array.push(sessLvls, s)
+        while array.size(sessLvls) > 24
+            SessLvl o = array.shift(sessLvls)
+            if not na(o.ln)
+                line.delete(o.ln)
+            if not na(o.lb)
+                label.delete(o.lb)
+ 
+if i_asiaOn
+    if inAsia and not inAsia[1]
+        asiaH := high
+        asiaL := low
+        asiaHb := bar_index
+        asiaLb := bar_index
+    else if inAsia
+        if high > nz(asiaH, high)
+            asiaH := high
+            asiaHb := bar_index
+        if low < nz(asiaL, low)
+            asiaL := low
+            asiaLb := bar_index
+    if not inAsia and inAsia[1]
+        pushSess(dateTag() + " ASIA.H", asiaH, nz(asiaHb, bar_index), true, i_asiaCol)
+        pushSess(dateTag() + " ASIA.L", asiaL, nz(asiaLb, bar_index), false, i_asiaCol)
+ 
+if i_londonOn
+    if inLondon and not inLondon[1]
+        lonH := high
+        lonL := low
+        lonHb := bar_index
+        lonLb := bar_index
+    else if inLondon
+        if high > nz(lonH, high)
+            lonH := high
+            lonHb := bar_index
+        if low < nz(lonL, low)
+            lonL := low
+            lonLb := bar_index
+    if not inLondon and inLondon[1]
+        pushSess(dateTag() + " LON.H", lonH, nz(lonHb, bar_index), true, i_londonCol)
+        pushSess(dateTag() + " LON.L", lonL, nz(lonLb, bar_index), false, i_londonCol)
+ 
+var float curDayH  = na
+var float curDayL  = na
+var int   curDayHb = na
+var int   curDayLb = na
+var float pdh      = na
+var float pdl      = na
+var int   pdhBar   = na
+var int   pdlBar   = na
+ 
+var float curWeekH  = na
+var float curWeekL  = na
+var int   curWeekHb = na
+var int   curWeekLb = na
+var float pwh       = na
+var float pwl       = na
+var int   pwhBar    = na
+var int   pwlBar    = na
+ 
+var line pdhLn = na
+var line pdlLn = na
+var line pwhLn = na
+var line pwlLn = na
+var label pdhLb = na
+var label pdlLb = na
+var label pwhLb = na
+var label pwlLb = na
+ 
+var bool pdhSwept = false
+var bool pdlSwept = false
+var bool pwhSwept = false
+var bool pwlSwept = false
+ 
+bool newDay  = ta.change(time("D")) != 0
+bool newWeek = ta.change(time("W")) != 0
+ 
+if newDay
+    pdh := curDayH
+    pdl := curDayL
+    pdhBar := curDayHb
+    pdlBar := curDayLb
+    pdhSwept := false
+    pdlSwept := false
+    curDayH := high
+    curDayL := low
+    curDayHb := time
+    curDayLb := time
+else
+    if na(curDayH) or high > curDayH
+        curDayH := high
+        curDayHb := time
+    if na(curDayL) or low < curDayL
+        curDayL := low
+        curDayLb := time
+ 
+if newWeek
+    pwh := curWeekH
+    pwl := curWeekL
+    pwhBar := curWeekHb
+    pwlBar := curWeekLb
+    pwhSwept := false
+    pwlSwept := false
+    curWeekH := high
+    curWeekL := low
+    curWeekHb := time
+    curWeekLb := time
+else
+    if na(curWeekH) or high > curWeekH
+        curWeekH := high
+        curWeekHb := time
+    if na(curWeekL) or low < curWeekL
+        curWeekL := low
+        curWeekLb := time
+ 
+if i_pdhpdl and not na(pdh) and not pdhSwept and high > pdh
+    pdhSwept := true
+if i_pdhpdl and not na(pdl) and not pdlSwept and low < pdl
+    pdlSwept := true
+if i_pwhpwl and not na(pwh) and not pwhSwept and high > pwh
+    pwhSwept := true
+if i_pwhpwl and not na(pwl) and not pwlSwept and low < pwl
+    pwlSwept := true
+ 
+drawKeyLevel(line ln, label lb, float px, int startT, bool swept, color col, string txt, bool isHigh) =>
+    line  outLn = ln
+    label outLb = lb
+    if not na(px) and not na(startT) and (not swept or i_preserveSweep)
+        int x1 = startT
+        int extTime = int(timeframe.in_seconds() * 1000 * i_sessExtend)
+        int x2 = swept ? time : time + extTime
+        if na(outLn)
+            outLn := line.new(x1, px, x2, px, xloc = xloc.bar_time, color = col, style = lineStyle(swept ? STY_DOT : i_sessStyle))
+            outLb := label.new(x2, px, txt, xloc = xloc.bar_time, style = isHigh ? label.style_label_down : label.style_label_up, color = color.new(color.white, 100), textcolor = col, size = txtSize(i_sessSize))
+        else
+            line.set_xy1(outLn, x1, px)
+            line.set_xy2(outLn, x2, px)
+            line.set_style(outLn, lineStyle(swept ? STY_DOT : i_sessStyle))
+            label.set_xy(outLb, x2, px)
+    else
+        if not na(outLn)
+            line.delete(outLn)
+            outLn := na
+        if not na(outLb)
+            label.delete(outLb)
+            outLb := na
+    [outLn, outLb]
+ 
+if barstate.islast
+    if i_pdhpdl
+        [t_pdhLn, t_pdhLb] = drawKeyLevel(pdhLn, pdhLb, pdh, pdhBar, pdhSwept, i_pdhCol, "PDH", true)
+        pdhLn := t_pdhLn
+        pdhLb := t_pdhLb
+ 
+        [t_pdlLn, t_pdlLb] = drawKeyLevel(pdlLn, pdlLb, pdl, pdlBar, pdlSwept, i_pdlCol, "PDL", false)
+        pdlLn := t_pdlLn
+        pdlLb := t_pdlLb
+ 
+    if i_pwhpwl
+        [t_pwhLn, t_pwhLb] = drawKeyLevel(pwhLn, pwhLb, pwh, pwhBar, pwhSwept, i_pwhCol, "PWH", true)
+        pwhLn := t_pwhLn
+        pwhLb := t_pwhLb
+ 
+        [t_pwlLn, t_pwlLb] = drawKeyLevel(pwlLn, pwlLb, pwl, pwlBar, pwlSwept, i_pwlCol, "PWL", false)
+        pwlLn := t_pwlLn
+        pwlLb := t_pwlLb
+ 
+var int lastSessSweepBar = -10000
+var bool lastSessSweepWasHigh = false
+ 
+if array.size(sessLvls) > 0
+    for i = array.size(sessLvls) - 1 to 0
+        SessLvl s = array.get(sessLvls, i)
+        if not s.swept
+            bool hit = s.high ? high > s.price : low < s.price
+            if hit
+                s.swept := true
+                s.sweptTime := time
+                lastSessSweepBar := bar_index
+                lastSessSweepWasHigh := s.high
+                if not i_preserveSweep
+                    if not na(s.ln)
+                        line.delete(s.ln)
+                        s.ln := na
+                    if not na(s.lb)
+                        label.delete(s.lb)
+                        s.lb := na
+                else
+                    if not na(s.ln)
+                        line.set_style(s.ln, line.style_dotted)
+                        line.set_x2(s.ln, bar_index)
+                    if not na(s.lb)
+                        label.set_x(s.lb, bar_index)
+        else
+            if not na(s.ln) and i_preserveSweep
+                line.set_x2(s.ln, math.max(line.get_x2(s.ln), s.bar + 1))
+ 
+if array.size(sessLvls) > 0
+    for i = array.size(sessLvls) - 1 to 0
+        SessLvl s = array.get(sessLvls, i)
+        if s.swept and not na(s.sweptTime) and (time - s.sweptTime) > 86400000
+            if not na(s.ln)
+                line.delete(s.ln)
+            if not na(s.lb)
+                label.delete(s.lb)
+            array.remove(sessLvls, i)
+ 
+if barstate.islast and array.size(sessLvls) > 0
+    for i = 0 to array.size(sessLvls) - 1
+        SessLvl s = array.get(sessLvls, i)
+        if not s.swept and not na(s.ln)
+            line.set_x2(s.ln, bar_index + i_sessExtend)
+            if not na(s.lb)
+                label.set_x(s.lb, bar_index + i_sessExtend - 4)
+ 
+nearestTargetAbove() =>
+    float best = na
+    if array.size(sessLvls) > 0
+        for i = 0 to array.size(sessLvls) - 1
+            SessLvl s = array.get(sessLvls, i)
+            if not s.swept and s.price > close
+                best := na(best) ? s.price : math.min(best, s.price)
+    if i_pdhpdl and not pdhSwept and not na(pdh) and pdh > close
+        best := na(best) ? pdh : math.min(best, pdh)
+    if i_pwhpwl and not pwhSwept and not na(pwh) and pwh > close
+        best := na(best) ? pwh : math.min(best, pwh)
+    best
+ 
+nearestTargetBelow() =>
+    float best = na
+    if array.size(sessLvls) > 0
+        for i = 0 to array.size(sessLvls) - 1
+            SessLvl s = array.get(sessLvls, i)
+            if not s.swept and s.price < close
+                best := na(best) ? s.price : math.max(best, s.price)
+    if i_pdhpdl and not pdlSwept and not na(pdl) and pdl < close
+        best := na(best) ? pdl : math.max(best, pdl)
+    if i_pwhpwl and not pwlSwept and not na(pwl) and pwl < close
+        best := na(best) ? pwl : math.max(best, pwl)
+    best
+ 
+bool ctfBullFvg = low > high[2] and close[1] > high[2]
+bool ctfBearFvg = high < low[2] and close[1] < low[2]
+ 
+var float ctfBullFvgTop = na
+var float ctfBullFvgBot = na
+var int ctfBullFvgBar = na
+var float ctfBearFvgTop = na
+var float ctfBearFvgBot = na
+var int ctfBearFvgBar = na
+ 
+if ctfBullFvg
+    ctfBullFvgTop := low
+    ctfBullFvgBot := high[2]
+    ctfBullFvgBar := bar_index
+if ctfBearFvg
+    ctfBearFvgTop := low[2]
+    ctfBearFvgBot := high
+    ctfBearFvgBar := bar_index
+ 
+bool inCtfBullFvg = not na(ctfBullFvgBot) and low <= ctfBullFvgTop and low >= ctfBullFvgBot
+bool inCtfBearFvg = not na(ctfBearFvgTop) and high >= ctfBearFvgBot and high <= ctfBearFvgTop
+ 
+var int lastCtfFvgDeliverLong  = -10000
+var int lastCtfFvgDeliverShort = -10000
+if inCtfBullFvg
+    lastCtfFvgDeliverLong := bar_index
+if inCtfBearFvg
+    lastCtfFvgDeliverShort := bar_index
+ 
+reqFvg(string tf) =>
+    request.security(syminfo.tickerid, tf, [high[3], low[3], high[2], low[2], high[1], low[1], time[1], time[3]], barmerge.gaps_off, barmerge.lookahead_off)
+ 
+[t1h2, t1l2, t1h1, t1l1, t1h0, t1l0, t1t, t1t2] = reqFvg(FVG_TF1)
+[t2h2, t2l2, t2h1, t2l1, t2h0, t2l0, t2t, t2t2] = reqFvg(FVG_TF2)
+[t3h2, t3l2, t3h1, t3l1, t3h0, t3l0, t3t, t3t2] = reqFvg(FVG_TF3)
+ 
+countFvg(bool bull, string tf) =>
+    int n = 0
+    if array.size(fvgs) > 0
+        for i = 0 to array.size(fvgs) - 1
+            Fvg f = array.get(fvgs, i)
+            if f.bull == bull and f.tf == tf and not f.mitigated
+                n += 1
+    n
+ 
+dropOldestFvg(bool bull, string tf) =>
+    int idx = -1
+    if array.size(fvgs) > 0
+        for i = 0 to array.size(fvgs) - 1
+            Fvg f = array.get(fvgs, i)
+            if f.bull == bull and f.tf == tf
+                idx := i
+                break
+    if idx >= 0
+        Fvg f = array.remove(fvgs, idx)
+        if not na(f.bx)
+            box.delete(f.bx)
+        if not na(f.lb)
+            label.delete(f.lb)
+ 
+addFvg(bool bull, float top, float bot, string tf, int startBar) =>
+    if i_showHtfFvg and not na(top) and not na(bot) and top > bot
+        Fvg f = Fvg.new(top, bot, startBar, bull, false, tf, na, na)
+        f.bx := box.new(startBar, top, bar_index + 5, bot, xloc = xloc.bar_index, border_color = i_fvgBorder ? (bull ? C_BULL_FVG : C_BEAR_FVG) : color.new(color.white, 100), border_width = i_fvgBorder ? 1 : 0, bgcolor = bull ? i_fvgBullCol : i_fvgBearCol)
+        float midY = math.avg(top, bot)
+        f.lb := label.new(bar_index + 5, midY, tfLabel(tf) + " FVG" + (bull ? "+" : "-"), xloc = xloc.bar_index, style = label.style_label_right, color = color.new(color.white, 100), textcolor = i_fvgLblCol, size = txtSize(i_fvgLblSize))
+        array.push(fvgs, f)
+        while countFvg(bull, tf) > i_fvgPerSide
+            dropOldestFvg(bull, tf)
+ 
+processTf(string tf, float h2, float l2, float h0, float l0, float tTime, float tTime2) =>
+    bool isNew = ta.change(tTime) != 0
+    if isNew and not na(h2) and not na(l2)
+        int startBar = na(tTime2) ? bar_index : findBarIndexByTime(int(tTime2))
+        if l0 > h2
+            addFvg(true, l0, h2, tf, startBar)
+        if h0 < l2
+            addFvg(false, l2, h0, tf, startBar)
+ 
+if i_showHtfFvg
+    processTf(FVG_TF1, t1h2, t1l2, t1h0, t1l0, t1t, t1t2)
+    if i_htfMode == "Automatic" or i_manualHTFs >= 2
+        processTf(FVG_TF2, t2h2, t2l2, t2h0, t2l0, t2t, t2t2)
+    if i_htfMode == "Manual" and i_manualHTFs >= 3
+        processTf(FVG_TF3, t3h2, t3l2, t3h0, t3l0, t3t, t3t2)
+ 
+var int lastHtfDeliverLong  = -10000
+var int lastHtfDeliverShort = -10000
+ 
+if array.size(fvgs) > 0
+    for i = array.size(fvgs) - 1 to 0
+        Fvg f = array.get(fvgs, i)
+        if not f.mitigated
+            if not na(f.bx)
+                box.set_right(f.bx, bar_index + 2)
+            if not na(f.lb)
+                label.set_x(f.lb, bar_index + 2)
+            if low <= f.top and high >= f.bot
+                if f.bull
+                    lastHtfDeliverLong := bar_index
+                else
+                    lastHtfDeliverShort := bar_index
+            bool mitigated = f.bull ? close < f.bot : close > f.top
+            if mitigated and i_fvgMitigate
+                f.mitigated := true
+                if not na(f.bx)
+                    box.delete(f.bx)
+                    f.bx := na
+                if not na(f.lb)
+                    label.delete(f.lb)
+                    f.lb := na
+                array.remove(fvgs, i)
+ 
+var float lastPlPx = na
+var int lastPlBar = na
+var float lastCmpPlPx = na
+var float lastPhPx = na
+var int lastPhBar = na
+var float lastCmpPhPx = na
+var int   lastBullSmtBar = -10000
+var int   lastBearSmtBar = -10000
+ 
+pruneSmt() =>
+    while array.size(smts) > i_smtMax
+        Smt s = array.shift(smts)
+        if not na(s.ln)
+            line.delete(s.ln)
+        if not na(s.lb)
+            label.delete(s.lb)
+ 
+drawSmt(bool bull, int b1, float p1, int b2, float p2) =>
+    Smt s = Smt.new(b1, b2, p1, p2, bull, na, na)
+    if i_showSMT
+        color col = bull ? i_smtBullCol : i_smtBearCol
+        s.ln := line.new(b1, p1, b2, p2, xloc = xloc.bar_index, color = col, style = lineStyle(bull ? i_smtBullStyle : i_smtBearStyle), width = widthOf(bull ? i_smtBullWidth : i_smtBearWidth))
+        if i_smtLabel
+            s.lb := label.new(int(math.avg(b1, b2)), bull ? math.min(p1, p2) : math.max(p1, p2), "SMT" + (i_smtSymbol ? " w/ " + SMT_SHORT : ""), xloc = xloc.bar_index, style = bull ? label.style_label_up : label.style_label_down, color = color.new(color.white, 100), textcolor = i_smtLblCol, size = txtSize(i_smtLblSize))
+    array.push(smts, s)
+    pruneSmt()
+ 
+if i_showSMT or i_cisdFromSMT
+    if not na(smtPl)
+        int thisBar = bar_index - smtLen
+        float thisPx = smtPl
+        float cmpPx  = cmpLow[smtLen]
+        if not na(lastPlPx) and not na(lastCmpPlPx)
+            bool divA = thisPx > lastPlPx and cmpPx < lastCmpPlPx
+            bool divB = thisPx < lastPlPx and cmpPx > lastCmpPlPx
+            if divA or divB
+                lastBullSmtBar := thisBar
+                drawSmt(true, lastPlBar, lastPlPx, thisBar, thisPx)
+        lastPlPx := thisPx
+        lastPlBar := thisBar
+        lastCmpPlPx := cmpPx
+ 
+    if not na(smtPh)
+        int thisBar = bar_index - smtLen
+        float thisPx = smtPh
+        float cmpPx  = cmpHigh[smtLen]
+        if not na(lastPhPx) and not na(lastCmpPhPx)
+            bool divA = thisPx < lastPhPx and cmpPx > lastCmpPhPx
+            bool divB = thisPx > lastPhPx and cmpPx < lastCmpPhPx
+            if divA or divB
+                lastBearSmtBar := thisBar
+                drawSmt(false, lastPhBar, lastPhPx, thisBar, thisPx)
+        lastPhPx := thisPx
+        lastPhBar := thisBar
+        lastCmpPhPx := cmpPx
+ 
+var line rtSmtLine = na
+if i_smtRealtime and i_showSMT and barstate.islast
+    bool rtBull = low < low[1] and cmpLow > cmpLow[1]
+    bool rtBear = high > high[1] and cmpHigh < cmpHigh[1]
+    if not na(rtSmtLine)
+        line.delete(rtSmtLine)
+        rtSmtLine := na
+    if rtBull
+        rtSmtLine := line.new(bar_index - 1, low[1], bar_index, low, xloc = xloc.bar_index, color = i_smtBullCol, style = line.style_dotted, width = 1)
+    else if rtBear
+        rtSmtLine := line.new(bar_index - 1, high[1], bar_index, high, xloc = xloc.bar_index, color = i_smtBearCol, style = line.style_dotted, width = 1)
+ 
+bool smtRecentBull = bar_index - lastBullSmtBar <= (i_smtLookback + smtLen)
+bool smtRecentBear = bar_index - lastBearSmtBar <= (i_smtLookback + smtLen)
+ 
+cm_legExtremeCurrent(int bias) =>
+    int temp_shift = 0
+    float extreme = open[0]
+    int ct0 = close[0] > open[0] ? 1 : close[0] < open[0] ? -1 : 0
+    if ct0 != 0 and ct0 == bias
+        for i = 1 to 500
+            int ctype = close[i] > open[i] ? 1 : close[i] < open[i] ? -1 : 0
+            if ctype == 0
+                continue
+            if ctype != bias
+                break
+            temp_shift := i
+            if bias == 1
+                if open[i] < extreme
+                    extreme := open[i]
+            else
+                if open[i] > extreme
+                    extreme := open[i]
+    int extreme_shift = 0
+    for k = 0 to temp_shift
+        if open[k] == extreme
+            extreme_shift := k
+            break
+    [extreme, bar_index - extreme_shift]
+ 
+cm_legExtremePrevious(int bias) =>
+    bool found = false
+    int max_shift = 1
+    float extreme = na
+    for j = 1 to 500
+        int ctype = close[j] > open[j] ? 1 : close[j] < open[j] ? -1 : 0
+        if ctype == 0
+            continue
+        bool matches = ctype == bias
+        if not found
+            if matches
+                found := true
+                max_shift := j
+                extreme := open[j]
+        else
+            if not matches
+                break
+            max_shift := j
+            if bias == 1
+                if open[j] < extreme
+                    extreme := open[j]
+            else
+                if open[j] > extreme
+                    extreme := open[j]
+    int extreme_shift = max_shift
+    for k = 1 to max_shift
+        if open[k] == extreme
+            extreme_shift := k
+            break
+    [extreme, bar_index - extreme_shift]
+ 
+var int   cm_bias     = 0
+var float cm_level    = na
+var int   cm_levelBar = na
+var float cm_pivot    = na
+var int   cm_pivotBar = na
+ 
+bool cm_firedBull = false
+bool cm_firedBear = false
+ 
+if cm_bias == 0 and bar_index > 10
+    int seedType = close > open ? 1 : close < open ? -1 : 0
+    if seedType == 0
+        for k = 1 to 50
+            seedType := close[k] > open[k] ? 1 : close[k] < open[k] ? -1 : 0
+            if seedType != 0
+                break
+    if seedType != 0
+        cm_bias := seedType
+        [oPrice, oBar] = cm_legExtremeCurrent(seedType)
+        cm_level    := oPrice
+        cm_levelBar := oBar
+        cm_pivot    := seedType == 1 ? high : low
+        cm_pivotBar := bar_index
+ 
+int cm_cType = close > open ? 1 : close < open ? -1 : 0
+ 
+if cm_bias == 1 and high > cm_pivot
+    cm_pivot    := high
+    cm_pivotBar := bar_index
+    float p = na
+    int   pb = na
+    if cm_cType == 1
+        [pp, ppb] = cm_legExtremeCurrent(1)
+        p := pp
+        pb := ppb
+    else
+        [pp, ppb] = cm_legExtremePrevious(1)
+        p := pp
+        pb := ppb
+    cm_level    := p
+    cm_levelBar := pb
+else if cm_bias == -1 and low < cm_pivot
+    cm_pivot    := low
+    cm_pivotBar := bar_index
+    float p2 = na
+    int   pb2 = na
+    if cm_cType == -1
+        [pp, ppb] = cm_legExtremeCurrent(-1)
+        p2 := pp
+        pb2 := ppb
+    else
+        [pp, ppb] = cm_legExtremePrevious(-1)
+        p2 := pp
+        pb2 := ppb
+    cm_level    := p2
+    cm_levelBar := pb2
+ 
+bool cm_bullFlip = cm_bias == -1 and close > cm_level
+bool cm_bearFlip = cm_bias == 1  and close < cm_level
+ 
+float pendBullLevel = na
+float pendBullExt = na
+float pendBullBodyExt = na
+int   pendBullExtB = na
+int   pendBullBodyExtB = na
+int   pendBullStart = na
+int   pendBullEnd = na
+ 
+float pendBearLevel = na
+float pendBearExt = na
+float pendBearBodyExt = na
+int   pendBearExtB = na
+int   pendBearBodyExtB = na
+int   pendBearStart = na
+int   pendBearEnd = na
+ 
+if cm_bullFlip
+    pendBullLevel    := cm_level
+    pendBullExt      := cm_pivot
+    pendBullBodyExt  := cm_pivot
+    pendBullExtB     := cm_pivotBar
+    pendBullBodyExtB := cm_pivotBar
+    pendBullStart    := cm_levelBar
+    pendBullEnd      := bar_index
+    cm_firedBull     := true
+ 
+if cm_bearFlip
+    pendBearLevel    := cm_level
+    pendBearExt      := cm_pivot
+    pendBearBodyExt  := cm_pivot
+    pendBearExtB     := cm_pivotBar
+    pendBearBodyExtB := cm_pivotBar
+    pendBearStart    := cm_levelBar
+    pendBearEnd      := bar_index
+    cm_firedBear     := true
+ 
+if cm_bullFlip or cm_bearFlip
+    int newBias = cm_bullFlip ? 1 : -1
+    cm_bias := newBias
+    [np, npb] = cm_legExtremeCurrent(newBias)
+    cm_level    := np
+    cm_levelBar := npb
+    cm_pivot    := newBias == 1 ? high : low
+    cm_pivotBar := bar_index
+ 
+int GATE_WINDOW = math.max(i_maxConfirmBars, 12)
+ 
+validLongOrigin() =>
+    bool swept = (i_ctfSweeps and bar_index - lastSweepSellBar <= GATE_WINDOW) or (bar_index - htfSweepSellBar <= GATE_WINDOW)
+    bool fvg   = i_ctfFvgDeliver and bar_index - lastCtfFvgDeliverLong <= GATE_WINDOW
+    bool smt   = i_cisdFromSMT and smtRecentBull
+    [swept or fvg, swept, fvg, smt]
+ 
+validShortOrigin() =>
+    bool swept = (i_ctfSweeps and bar_index - lastSweepBuyBar <= GATE_WINDOW) or (bar_index - htfSweepBuyBar <= GATE_WINDOW)
+    bool fvg   = i_ctfFvgDeliver and bar_index - lastCtfFvgDeliverShort <= GATE_WINDOW
+    bool smt   = i_cisdFromSMT and smtRecentBear
+    [swept or fvg, swept, fvg, smt]
+ 
+proximityBlocked(array<Cisd> arr, float level) =>
+    bool blocked = false
+    if i_ignoreProx and array.size(arr) > 0 and not na(atr)
+        for i = 0 to array.size(arr) - 1
+            Cisd c = array.get(arr, i)
+            if not c.invalidated and math.abs(c.level - level) < atr * i_proxATR
+                blocked := true
+                break
+    blocked
+ 
+gradeSetup(bool bull, bool sweptLiq, bool pda, bool volOk, bool sessSweep, bool targets, bool smt) =>
+    int enabled = 0
+    int hits = 0
+    if i_ckSweep
+        enabled += 1
+        hits += sweptLiq ? 1 : 0
+    if i_ckPDA
+        enabled += 1
+        hits += pda ? 1 : 0
+    if i_ckVolume
+        enabled += 1
+        hits += volOk ? 1 : 0
+    if i_ckSession
+        enabled += 1
+        hits += sessSweep ? 1 : 0
+    if i_ckTargets
+        enabled += 1
+        hits += targets ? 1 : 0
+    if i_ckSMT
+        enabled += 1
+        hits += smt ? 1 : 0
+    float ratio = enabled == 0 ? 0.0 : hits / enabled
+    int g = ratio >= 0.95 ? 7 : ratio >= 0.80 ? 6 : ratio >= 0.65 ? 5 : ratio >= 0.45 ? 4 : ratio >= 0.25 ? 3 : 0
+    g
+ 
+contractsFor(float entry, float sl) =>
+    float dist = math.abs(entry - sl)
+    float pv   = syminfo.pointvalue
+    int n = 0
+    if dist > 0 and pv > 0
+        n := int(math.floor(i_riskUSD / (dist * pv)))
+    math.max(n, 0)
+ 
+riskFor(float entry, float sl, int qty) =>
+    math.abs(entry - sl) * syminfo.pointvalue * qty
+ 
+deleteCisd(Cisd c) =>
+    if not na(c.ln)
+        line.delete(c.ln)
+        c.ln := na
+    if not na(c.lb)
+        label.delete(c.lb)
+        c.lb := na
+    if not na(c.slLn)
+        line.delete(c.slLn)
+        c.slLn := na
+    if not na(c.slLb)
+        label.delete(c.slLb)
+        c.slLb := na
+ 
+pruneCisd(array<Cisd> arr) =>
+    while array.size(arr) > i_setupsShown
+        Cisd c = array.shift(arr)
+        deleteCisd(c)
+ 
+buildTooltip(Cisd c) =>
+    string t = (c.bull ? "BULLISH" : "BEARISH") + " CISD  ·  " + tfLabel(c.tf) + "\n"
+    t += "Grade: " + gradeText(c.grade) + "\n"
+    t += "Entry: " + str.tostring(c.level, format.mintick) + "\n"
+    t += "Stop : " + str.tostring(c.slPrice, format.mintick) + "\n"
+    t += "Dist : " + str.tostring(math.abs(c.level - c.slPrice), format.mintick) + "\n"
+    if i_sizingOn
+        t += "Size : " + str.tostring(c.contracts) + " contracts  (~$" + str.tostring(math.round(riskFor(c.level, c.slPrice, c.contracts))) + ")\n"
+    if not na(c.target)
+        float rr = math.abs(c.target - c.level) / math.max(math.abs(c.level - c.slPrice), syminfo.mintick)
+        t += "Target: " + str.tostring(c.target, format.mintick) + "  (" + str.tostring(rr, "#.##") + "R)\n"
+    t += "──────────────\n"
+    t += (c.ckSweep   ? "✅" : "❌") + " Liquidity Sweep\n"
+    t += (c.ckPDA     ? "✅" : "❌") + " HTF PDA Delivery\n"
+    t += (c.ckVol     ? "✅" : "❌") + " Volume\n"
+    t += (c.ckSession ? "✅" : "❌") + " Session Sweep\n"
+    t += (c.ckTargets ? "✅" : "❌") + " Clear Targets\n"
+    t += (c.ckSMT     ? "✅" : "❌") + " SMT"
+    t
+ 
+renderCisd(Cisd c) =>
+    color col = c.bull ? i_longCol : i_shortCol
+    bool isCtf = c.tf == timeframe.period
+    string lbTxt = tfLabel(c.tf) + " CISD" + (c.bull ? "+" : "-")
+    if c.potential
+        lbTxt := "Potential " + lbTxt
+    if na(c.ln)
+        c.ln := line.new(c.startBar, c.level, bar_index + 3, c.level, xloc = xloc.bar_index, color = col, style = c.potential ? line.style_dashed : line.style_solid, width = i_cisdWidth)
+    else
+        line.set_xy1(c.ln, c.startBar, c.level)
+        line.set_xy2(c.ln, math.min(bar_index + 3, c.startBar + i_cisdExtend), c.level)
+        line.set_style(c.ln, c.potential ? line.style_dashed : line.style_solid)
+        line.set_color(c.ln, col)
+ 
+    bool wantLabel = not (isCtf and i_disableCtfLbl and not c.potential)
+    if wantLabel
+        if na(c.lb)
+            c.lb := label.new(line.get_x2(c.ln), c.level, lbTxt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.white, 100), textcolor = col, size = txtSize(i_cisdLblSize), tooltip = buildTooltip(c))
+        else
+            label.set_xy(c.lb, line.get_x2(c.ln), c.level)
+            label.set_text(c.lb, lbTxt + (i_sizingOn and not i_hoverOnly ? "  " + str.tostring(c.contracts) + "c" : ""))
+            label.set_tooltip(c.lb, buildTooltip(c))
+    else if not na(c.lb)
+        label.delete(c.lb)
+        c.lb := na
+ 
+    int slEndBar = c.slBar + i_slExtendBars
+    if i_showSL and not na(c.slPrice) and isCtf
+        if na(c.slLn)
+            c.slLn := line.new(c.slBar, c.slPrice, slEndBar, c.slPrice, xloc = xloc.bar_index, color = i_slCol, style = lineStyle(i_slStyle), width = 1)
+            c.slLb := label.new(slEndBar, c.slPrice, "SL", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.white, 100), textcolor = i_slCol, size = txtSize(i_cisdLblSize))
+        else
+            line.set_xy1(c.slLn, c.slBar, c.slPrice)
+            line.set_xy2(c.slLn, slEndBar, c.slPrice)
+            label.set_xy(c.slLb, slEndBar, c.slPrice)
+    else
+        if not na(c.slLn)
+            line.delete(c.slLn)
+            c.slLn := na
+        if not na(c.slLb)
+            label.delete(c.slLb)
+            c.slLb := na
+ 
+    c
+ 
+makeCisd(bool bull, float level, float ext, float bodyExt, int startB, int endB, int slB, bool potential, string tf, bool sweptLiq, bool pda, bool volOk, bool sessSweep, bool smt) =>
+    float sl = i_slPlacement == "Wick" ? ext : bodyExt
+    int actualSlBar = na(slB) ? startB : slB
+    float tgt = bull ? nearestTargetAbove() : nearestTargetBelow()
+    float dist = math.abs(level - sl)
+    bool  clearTargets = not na(tgt) and dist > 0 and (math.abs(tgt - level) / dist) >= i_minRR
+    int   g = gradeSetup(bull, sweptLiq, pda, volOk, sessSweep, clearTargets, smt)
+    Cisd c = Cisd.new(level, ext, bodyExt, startB, endB, actualSlBar, potential ? na : bar_index, bull, not potential, false, potential, tf, g, sweptLiq, pda, volOk, sessSweep, clearTargets, smt, tgt, 0, sl, na, na, na, na)
+    c.contracts := i_sizingOn ? contractsFor(level, sl) : 0
+    c
+ 
+qualifies(Cisd c) =>
+    bool dirOk = c.bull ? biasAllowsLong : biasAllowsShort
+    bool gradeOk = c.grade >= gradeRank(i_minGrade)
+    dirOk and gradeOk
+ 
+var int  bullFiredBar = -10000
+var bool newBullCisd  = false
+var bool newBearCisd  = false
+newBullCisd := false
+newBearCisd := false
+ 
+if i_showCISD and cm_firedBull and biasAllowsLong
+    [ok, swept, fvg, smt] = validLongOrigin()
+    if ok and not proximityBlocked(cisdBull, pendBullLevel)
+        bool pda = bar_index - lastHtfDeliverLong <= GATE_WINDOW
+        bool sess = bar_index - lastSessSweepBar <= GATE_WINDOW and not lastSessSweepWasHigh
+        Cisd c = makeCisd(true, pendBullLevel, pendBullExt, pendBullBodyExt, pendBullStart, pendBullEnd, pendBullExtB, false, timeframe.period, swept, pda, volSpike, sess, smt)
+        if qualifies(c)
+            array.push(cisdBull, c)
+            pruneCisd(cisdBull)
+            newBullCisd := true
+            bullFiredBar := bar_index
+            lastGradeVal := c.grade
+            lastGradeIsBull := true
+ 
+if i_showCISD and cm_firedBear and biasAllowsShort
+    [ok, swept, fvg, smt] = validShortOrigin()
+    if ok and not proximityBlocked(cisdBear, pendBearLevel)
+        bool pda = bar_index - lastHtfDeliverShort <= GATE_WINDOW
+        bool sess = bar_index - lastSessSweepBar <= GATE_WINDOW and lastSessSweepWasHigh
+        Cisd c = makeCisd(false, pendBearLevel, pendBearExt, pendBearBodyExt, pendBearStart, pendBearEnd, pendBearExtB, false, timeframe.period, swept, pda, volSpike, sess, smt)
+        if qualifies(c)
+            array.push(cisdBear, c)
+            pruneCisd(cisdBear)
+            newBearCisd := true
+            lastGradeVal := c.grade
+            lastGradeIsBull := false
+ 
+var line potBullLn = na
+var label potBullLb = na
+var line potBearLn = na
+var label potBearLb = na
+ 
+var int lastPotBullBar = -10000
+var int lastPotBearBar = -10000
+var bool newPotBull = false
+var bool newPotBear = false
+newPotBull := false
+newPotBear := false
+ 
+if barstate.islast
+    if not na(potBullLn)
+        line.delete(potBullLn)
+        potBullLn := na
+    if not na(potBullLb)
+        label.delete(potBullLb)
+        potBullLb := na
+    if not na(potBearLn)
+        line.delete(potBearLn)
+        potBearLn := na
+    if not na(potBearLb)
+        label.delete(potBearLb)
+        potBearLb := na
+ 
+    if i_showCISD and i_showPotential
+        if cm_bias == -1 and biasAllowsLong and close < cm_level
+            [ok, swept, fvg, smt] = validLongOrigin()
+            if ok
+                float sl = cm_pivot
+                int qty = i_sizingOn ? contractsFor(cm_level, sl) : 0
+                potBullLn := line.new(cm_levelBar, cm_level, bar_index + 5, cm_level, xloc = xloc.bar_index, color = color.new(i_longCol, 25), style = line.style_dashed, width = i_cisdWidth)
+                string t = "Potential " + tfLabel(timeframe.period) + " CISD+\nClose above " + str.tostring(cm_level, format.mintick) + " to confirm\nSL " + str.tostring(sl, format.mintick) + (i_sizingOn ? "\nSize " + str.tostring(qty) + " contracts" : "")
+                potBullLb := label.new(bar_index + 5, cm_level, "Potential " + tfLabel(timeframe.period) + " CISD+" + (i_sizingOn and not i_hoverOnly ? "  " + str.tostring(qty) + "c" : ""), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.white, 100), textcolor = i_longCol, size = txtSize(i_cisdLblSize), tooltip = t)
+                if lastPotBullBar != cm_levelBar
+                    newPotBull := true
+                    lastPotBullBar := cm_levelBar
+        if cm_bias == 1 and biasAllowsShort and close > cm_level
+            [ok, swept, fvg, smt] = validShortOrigin()
+            if ok
+                float sl = cm_pivot
+                int qty = i_sizingOn ? contractsFor(cm_level, sl) : 0
+                potBearLn := line.new(cm_levelBar, cm_level, bar_index + 5, cm_level, xloc = xloc.bar_index, color = color.new(i_shortCol, 25), style = line.style_dashed, width = i_cisdWidth)
+                string t = "Potential " + tfLabel(timeframe.period) + " CISD-\nClose below " + str.tostring(cm_level, format.mintick) + " to confirm\nSL " + str.tostring(sl, format.mintick) + (i_sizingOn ? "\nSize " + str.tostring(qty) + " contracts" : "")
+                potBearLb := label.new(bar_index + 5, cm_level, "Potential " + tfLabel(timeframe.period) + " CISD-" + (i_sizingOn and not i_hoverOnly ? "  " + str.tostring(qty) + "c" : ""), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.white, 100), textcolor = i_shortCol, size = txtSize(i_cisdLblSize), tooltip = t)
+                if lastPotBearBar != cm_levelBar
+                    newPotBear := true
+                    lastPotBearBar := cm_levelBar
+ 
+maintain(array<Cisd> arr) =>
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            Cisd c = array.get(arr, i)
+            bool killed = c.bull ? close < c.slPrice : close > c.slPrice
+            if killed and not c.invalidated
+                c.invalidated := true
+                if i_hideInvalid
+                    deleteCisd(c)
+                    array.remove(arr, i)
+                    continue
+                else
+                    if not na(c.ln)
+                        line.set_color(c.ln, color.new(color.gray, 55))
+                        line.set_style(c.ln, line.style_dotted)
+            if not c.invalidated
+                renderCisd(c)
+ 
+maintain(cisdBull)
+maintain(cisdBear)
+ 
+htfCisdCalc() =>
+    bool dn = close < open
+    bool up = close > open
+    var int   dStart  = na
+    var float dOpen   = na
+    var float dLow    = na
+    var float dBody   = na
+    var float dStartT = na
+    var int   uStart  = na
+    var float uOpen   = na
+    var float uHigh   = na
+    var float uBody   = na
+    var float uStartT = na
+ 
+    if dn
+        if not dn[1]
+            dStart  := bar_index
+            dOpen   := open
+            dLow    := low
+            dBody   := close
+            dStartT := time
+        else
+            dLow  := math.min(nz(dLow, low), low)
+            dBody := math.min(nz(dBody, close), close)
+    if up
+        if not up[1]
+            uStart  := bar_index
+            uOpen   := open
+            uHigh   := high
+            uBody   := close
+            uStartT := time
+        else
+            uHigh := math.max(nz(uHigh, high), high)
+            uBody := math.max(nz(uBody, close), close)
+ 
+    var float pBullLvl  = na
+    var float pBullExt  = na
+    var float pBullBody = na
+    var float pBullTime = na
+    var float pBearLvl  = na
+    var float pBearExt  = na
+    var float pBearBody = na
+    var float pBearTime = na
+ 
+    if dn[1] and not dn
+        pBullLvl  := dOpen[1]
+        pBullExt  := dLow[1]
+        pBullBody := dBody[1]
+        pBullTime := dStartT[1]
+    if up[1] and not up
+        pBearLvl  := uOpen[1]
+        pBearExt  := uHigh[1]
+        pBearBody := uBody[1]
+        pBearTime := uStartT[1]
+ 
+    float confBull = na
+    float confBullExt = na
+    float confBullBody = na
+    float confBear = na
+    float confBearExt = na
+    float confBearBody = na
+ 
+    if not na(pBullLvl) and close > pBullLvl and close[1] <= pBullLvl
+        confBull := pBullLvl
+        confBullExt := pBullExt
+        confBullBody := pBullBody
+    if not na(pBearLvl) and close < pBearLvl and close[1] >= pBearLvl
+        confBear := pBearLvl
+        confBearExt := pBearExt
+        confBearBody := pBearBody
+ 
+    [confBull, confBullExt, confBullBody, confBear, confBearExt, confBearBody, pBullLvl, pBearLvl, pBullTime, pBearTime, time]
+ 
+[h1cb, h1cbe, h1cbb, h1cs, h1cse, h1csb, h1pb, h1ps, h1pbt, h1pst, h1t] = request.security(syminfo.tickerid, HC_TF1, htfCisdCalc(), barmerge.gaps_off, barmerge.lookahead_off)
+[h2cb, h2cbe, h2cbb, h2cs, h2cse, h2csb, h2pb, h2ps, h2pbt, h2pst, h2t] = request.security(syminfo.tickerid, HC_TF2, htfCisdCalc(), barmerge.gaps_off, barmerge.lookahead_off)
+ 
+var bool newHtfCisd = false
+newHtfCisd := false
+ 
+htfStartBar(float t) =>
+    int result = bar_index
+    if not na(t)
+        float tfMs = timeframe.in_seconds(timeframe.period) * 1000.0
+        int barsAgo = tfMs > 0 ? int(math.round((time - t) / tfMs)) : 0
+        result := math.max(bar_index - barsAgo, 0)
+    result
+ 
+pushHtfCisd(bool bull, float lvl, float ext, float bodyExt, float startTime, string tf) =>
+    bool added = false
+    if not na(lvl)
+        bool dup = false
+        if array.size(cisdHtf) > 0
+            for i = 0 to array.size(cisdHtf) - 1
+                Cisd c = array.get(cisdHtf, i)
+                if c.tf == tf and c.bull == bull and math.abs(c.level - lvl) < syminfo.mintick
+                    dup := true
+                    break
+        if not dup
+            bool swept = bull ? (bar_index - lastSweepSellBar <= GATE_WINDOW or bar_index - htfSweepSellBar <= GATE_WINDOW) : (bar_index - lastSweepBuyBar <= GATE_WINDOW or bar_index - htfSweepBuyBar <= GATE_WINDOW)
+            bool pda = bull ? bar_index - lastHtfDeliverLong <= GATE_WINDOW : bar_index - lastHtfDeliverShort <= GATE_WINDOW
+            bool sess = bar_index - lastSessSweepBar <= GATE_WINDOW and (bull ? not lastSessSweepWasHigh : lastSessSweepWasHigh)
+            bool smt = bull ? smtRecentBull : smtRecentBear
+            int  startB = htfStartBar(startTime)
+            Cisd c = makeCisd(bull, lvl, ext, bodyExt, startB, bar_index, startB, false, tf, swept, pda, volSpike, sess, smt)
+            if qualifies(c)
+                array.push(cisdHtf, c)
+                added := true
+                while array.size(cisdHtf) > i_setupsShown * 2
+                    Cisd o = array.shift(cisdHtf)
+                    deleteCisd(o)
+    added
+ 
+if i_showHtfCISD
+    if ta.change(h1t) != 0 or barstate.islast
+        if pushHtfCisd(true, h1cb, h1cbe, h1cbb, h1pbt, HC_TF1)
+            newHtfCisd := true
+        if pushHtfCisd(false, h1cs, h1cse, h1csb, h1pst, HC_TF1)
+            newHtfCisd := true
+    if ta.change(h2t) != 0 or barstate.islast
+        if pushHtfCisd(true, h2cb, h2cbe, h2cbb, h2pbt, HC_TF2)
+            newHtfCisd := true
+        if pushHtfCisd(false, h2cs, h2cse, h2csb, h2pst, HC_TF2)
+            newHtfCisd := true
+    maintain(cisdHtf)
+ 
+mergeCtfWithHtf(array<Cisd> ctfArr) =>
+    if array.size(ctfArr) > 0 and array.size(cisdHtf) > 0
+        for i = 0 to array.size(ctfArr) - 1
+            Cisd c = array.get(ctfArr, i)
+            if not c.invalidated and not na(c.lb)
+                string tfs = tfLabel(c.tf)
+                float tol = atr * i_mergeTolATR
+                bool merged = false
+                for j = 0 to array.size(cisdHtf) - 1
+                    Cisd h = array.get(cisdHtf, j)
+                    if h.bull == c.bull and not h.invalidated and math.abs(h.level - c.level) <= tol
+                        tfs := tfs + "+" + tfLabel(h.tf)
+                        merged := true
+                        if not na(h.lb)
+                            label.delete(h.lb)
+                            h.lb := na
+                        if not na(h.ln)
+                            line.delete(h.ln)
+                            h.ln := na
+                if merged
+                    string suffix = c.bull ? "+" : "-"
+                    label.set_text(c.lb, tfs + " CISD" + suffix + (i_sizingOn and not i_hoverOnly ? "  " + str.tostring(c.contracts) + "c" : ""))
+ 
+if i_showHtfCISD
+    mergeCtfWithHtf(cisdBull)
+    mergeCtfWithHtf(cisdBear)
+ 
+var line hpb1 = na
+var line hps1 = na
+var line hpb2 = na
+var line hps2 = na
+if i_showHtfCISD and i_htfPotential and barstate.islast
+    if not na(hpb1)
+        line.delete(hpb1)
+        hpb1 := na
+    if not na(hps1)
+        line.delete(hps1)
+        hps1 := na
+    if not na(hpb2)
+        line.delete(hpb2)
+        hpb2 := na
+    if not na(hps2)
+        line.delete(hps2)
+        hps2 := na
+    if not na(h1pb) and close < h1pb
+        hpb1 := line.new(bar_index - 20, h1pb, bar_index + 5, h1pb, xloc = xloc.bar_index, color = color.new(i_longCol, 45), style = lineStyle(i_htfCisdStyle))
+    if not na(h1ps) and close > h1ps
+        hps1 := line.new(bar_index - 20, h1ps, bar_index + 5, h1ps, xloc = xloc.bar_index, color = color.new(i_shortCol, 45), style = lineStyle(i_htfCisdStyle))
+    if not na(h2pb) and close < h2pb
+        hpb2 := line.new(bar_index - 20, h2pb, bar_index + 5, h2pb, xloc = xloc.bar_index, color = color.new(i_longCol, 60), style = lineStyle(i_htfCisdStyle))
+    if not na(h2ps) and close > h2ps
+        hps2 := line.new(bar_index - 20, h2ps, bar_index + 5, h2ps, xloc = xloc.bar_index, color = color.new(i_shortCol, 60), style = lineStyle(i_htfCisdStyle))
+ 
+var line tgtLn = na
+var label tgtLb = na
+ 
+if i_showTarget and barstate.islast
+    if not na(tgtLn)
+        line.delete(tgtLn)
+        tgtLn := na
+    if not na(tgtLb)
+        label.delete(tgtLb)
+        tgtLb := na
+    Cisd ref = na
+    if array.size(cisdBull) > 0 and array.size(cisdBear) > 0
+        Cisd b = array.get(cisdBull, array.size(cisdBull) - 1)
+        Cisd s = array.get(cisdBear, array.size(cisdBear) - 1)
+        ref := b.endBar >= s.endBar ? b : s
+    else if array.size(cisdBull) > 0
+        ref := array.get(cisdBull, array.size(cisdBull) - 1)
+    else if array.size(cisdBear) > 0
+        ref := array.get(cisdBear, array.size(cisdBear) - 1)
+ 
+    if not na(ref) and not na(ref.target) and not ref.invalidated
+        int tgtEndBar = ref.endBar + i_tgtExtendBars
+        int tgtStartBar = math.max(ref.endBar, tgtEndBar - 2) 
+        tgtLn := line.new(tgtStartBar, ref.target, tgtEndBar, ref.target, xloc = xloc.bar_index, color = color.new(ref.bull ? i_longCol : i_shortCol, 35), style = line.style_solid, width = 2)
+        float rr = math.abs(ref.target - ref.level) / math.max(math.abs(ref.level - ref.slPrice), syminfo.mintick)
+        tgtLb := label.new(tgtEndBar, ref.target, "TP  " + str.tostring(rr, "#.##") + "R", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.white, 100), textcolor = ref.bull ? i_longCol : i_shortCol, size = txtSize(i_cisdLblSize))
+ 
+var table ck = table.new(tblPosOf(i_tblPos), 2, 10, border_width = 1, border_color = color.new(#26303E, 70))
+ 
+activeRef() =>
+    Cisd r = na
+    if array.size(cisdBull) > 0 and array.size(cisdBear) > 0
+        Cisd b = array.get(cisdBull, array.size(cisdBull) - 1)
+        Cisd s = array.get(cisdBear, array.size(cisdBear) - 1)
+        r := b.endBar >= s.endBar ? b : s
+    else if array.size(cisdBull) > 0
+        r := array.get(cisdBull, array.size(cisdBull) - 1)
+    else if array.size(cisdBear) > 0
+        r := array.get(cisdBear, array.size(cisdBear) - 1)
+    r
+ 
+mark(bool b) =>
+    b ? "✅" : "❌"
+ 
+rowTint(bool ok) =>
+    i_ckTintRows ? (ok ? i_ckPassCol : i_ckFailCol) : i_cellCol
+ 
+biasColor() =>
+    switch i_bias
+        "Bullish" => color.new(#089981, 0)
+        "Bearish" => color.new(#F23645, 0)
+        => color.new(#e0e3eb, 0)
+ 
+checklistRow(int row, string label, bool ok) =>
+    table.cell(ck, 0, row, label, bgcolor = rowTint(ok), text_color = color.new(#b2b5be, 0), text_size = txtSize(i_tblSize), text_halign = text.align_center)
+    table.cell(ck, 1, row, mark(ok), bgcolor = rowTint(ok), text_size = txtSize(i_tblSize), text_halign = text.align_center)
+ 
+if barstate.islast and i_showChecklist
+    table.clear(ck, 0, 0, 1, 9)
+    Cisd r = activeRef()
+    int row = 0
+ 
+    table.cell(ck, 0, row, "Bias", bgcolor = i_hdrBg, text_color = i_hdrTxt, text_size = txtSize(i_tblSize), text_halign = text.align_center)
+    table.cell(ck, 1, row, i_bias, bgcolor = i_hdrBg, text_color = biasColor(), text_size = txtSize(i_tblSize), text_halign = text.align_center)
+    row += 1
+ 
+    if i_showGrade
+        int g = na(r) ? 0 : r.grade
+        table.cell(ck, 0, row, "Setup Grade", bgcolor = i_hdrBg, text_color = i_hdrTxt, text_size = txtSize(i_tblSize), text_halign = text.align_center)
+        table.cell(ck, 1, row, gradeText(g), bgcolor = i_hdrBg, text_color = gradeColor(g), text_size = txtSize(i_tblSize), text_halign = text.align_center)
+        row += 1
+ 
+    table.cell(ck, 0, row, "Checklist", bgcolor = i_hdrBg, text_color = i_hdrTxt, text_size = txtSize(i_tblSize), text_halign = text.align_center)
+    table.cell(ck, 1, row, "Status", bgcolor = i_hdrBg, text_color = i_hdrTxt, text_size = txtSize(i_tblSize), text_halign = text.align_center)
+    row += 1
+ 
+    if i_ckSweep
+        checklistRow(row, "Liquidity Sweep", na(r) ? false : r.ckSweep)
+        row += 1
+    if i_ckPDA
+        checklistRow(row, "HTF PDA Delivery", na(r) ? false : r.ckPDA)
+        row += 1
+    if i_ckVolume
+        checklistRow(row, "Volume", na(r) ? false : r.ckVol)
+        row += 1
+    if i_ckSession
+        checklistRow(row, "Session Sweep", na(r) ? false : r.ckSession)
+        row += 1
+    if i_ckTargets
+        checklistRow(row, "Clear Targets", na(r) ? false : r.ckTargets)
+        row += 1
+    if i_ckSMT
+        checklistRow(row, "SMT", na(r) ? false : r.ckSMT)
+        row += 1
+ 
+var table wm = table.new(tblPosOf(i_wmPos), 1, 4)
+ 
+wmDateTxt() =>
+    string mm = str.tostring(month(time_close, TZ))
+    string dd = str.tostring(dayofmonth(time_close, TZ))
+    string yy = str.tostring(year(time_close, TZ))
+    dd + " " + mm + " " + yy
+ 
+if barstate.islast and i_showInfoBox
+    table.clear(wm, 0, 0, 0, 3)
+    table.cell(wm, 0, 0, i_wmSite, text_color = i_wmTextCol, text_size = size.small)
+    table.cell(wm, 0, 1, i_wmLine1, text_color = i_wmTextCol, text_size = size.normal)
+    if i_wmShowDate
+        table.cell(wm, 0, 2, syminfo.ticker + "  (" + tfLabel(timeframe.period) + ")", text_color = i_wmTextCol, text_size = size.small)
+        table.cell(wm, 0, 3, wmDateTxt(), text_color = i_wmTextCol, text_size = size.tiny)
+ 
+inAlertWindow() =>
+    bool w1 = i_alertS1 and not na(time(timeframe.period, i_alertS1Win, TZ))
+    bool w2 = i_alertS2 and not na(time(timeframe.period, i_alertS2Win, TZ))
+    bool w3 = i_alertS3 and not na(time(timeframe.period, i_alertS3Win, TZ))
+    bool none = not i_alertS1 and not i_alertS2 and not i_alertS3
+    none or w1 or w2 or w3
+ 
+string sideTxt = newBullCisd ? "BULLISH" : "BEARISH"
+string gradeTxt = gradeText(lastGradeVal)
+ 
+if i_alertsOn and inAlertWindow()
+    if i_alertConfirmed and (newBullCisd or newBearCisd)
+        alert(i_msgConfirmed + " | " + sideTxt + " | " + syminfo.ticker + " " + tfLabel(timeframe.period) + " | Grade " + gradeTxt + " | Level " + str.tostring(newBullCisd ? close : close, format.mintick), alert.freq_once_per_bar_close)
+    if i_alertPotential and (newPotBull or newPotBear)
+        alert(i_msgPotential + " | " + (newPotBull ? "BULLISH" : "BEARISH") + " | " + syminfo.ticker + " " + tfLabel(timeframe.period), alert.freq_once_per_bar)
+    if i_alertHTF and newHtfCisd
+        alert(i_msgHTF + " | " + syminfo.ticker + " | " + tfLabel(HC_TF1) + "/" + tfLabel(HC_TF2), alert.freq_once_per_bar_close)
+    if i_alertSweep and (sweptBuyNow or sweptSellNow)
+        alert(i_msgSweep + " | " + (sweptBuyNow ? "BUYSIDE" : "SELLSIDE") + " | " + syminfo.ticker + " " + tfLabel(timeframe.period), alert.freq_once_per_bar_close)
+    if i_alertSMT and (bar_index == lastBullSmtBar + smtLen or bar_index == lastBearSmtBar + smtLen)
+        alert(i_msgSMT + " | " + syminfo.ticker + " vs " + SMT_SHORT, alert.freq_once_per_bar_close)
+ 
+alertcondition(newBullCisd, "Bullish CISD confirmed", "Bullish CISD confirmed")
+alertcondition(newBearCisd, "Bearish CISD confirmed", "Bearish CISD confirmed")
+alertcondition(sweptBuyNow, "Buyside liquidity swept", "Buyside liquidity swept")
+alertcondition(sweptSellNow, "Sellside liquidity swept", "Sellside liquidity swept")
+ 
+plot(na(atr) ? na : atr, "ATR(14)", display = display.data_window)
+plot(volSMA, "Volume SMA(20)", display = display.data_window)
+plot(lastGradeVal, "Last Grade (numeric)", display = display.data_window)
+plot(array.size(cisdBull), "Active Bullish CISDs", display = display.data_window)
+plot(array.size(cisdBear), "Active Bearish CISDs", display = display.data_window)
+plot(array.size(fvgs), "Active HTF FVGs", display = display.data_window)
+plot(array.size(sessLvls), "Session Levels", display = display.data_window)
+plot(array.size(smts), "SMT Count", display = display.data_window)
