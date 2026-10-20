@@ -1,0 +1,377 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+indicator("ICT Unicorn Model+", "Unicorn+", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100, max_bars_back = 1500)
+
+string direction = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = "Model")
+int swingMinutes = input.int(3, "Swing confirmation (minutes per side)", minval = 1, maxval = 60, group = "Model")
+int seedMinutes = input.int(120, "Sweep to break timeout (minutes)", minval = 1, maxval = 1440, group = "Model")
+int gapMinutes = input.int(10, "Break to FVG timeout (minutes)", minval = 1, maxval = 240, group = "Model")
+int retestMinutes = input.int(60, "Overlap to retest timeout (minutes)", minval = 1, maxval = 1440, group = "Model")
+string breakerRange = input.string("Wick", "Breaker range", options = ["Wick", "Body"], group = "Model")
+float displacement = input.float(0.5, "FVG middle body / prior ATR(14)", minval = 0, step = 0.1, group = "Model")
+int minGapTicks = input.int(1, "Minimum FVG (ticks)", minval = 1, group = "Model")
+float reward = input.float(2, "Target (R)", minval = 0.25, step = 0.25, group = "Model")
+int stopTicks = input.int(1, "Stop beyond sweep (ticks)", minval = 0, group = "Model")
+bool sessionFilter = input.bool(false, "Filter confirmations by NY session", group = "Filters")
+string entrySession = input.session("0830-1100", "New York session", group = "Filters")
+string maxTf = input.timeframe("15", "Timeframe Limit", group = "Display")
+string lookback = input.string("1 Week", "Lookback", options = ["1 Day", "1 Week", "1 Month", "Max"], group = "Display")
+int maxVisible = input.int(5, "Max Visible", minval = 1, maxval = 25, group = "Display")
+string displayMode = input.string("Minimal", "Display", options = ["Minimal", "Full"], group = "Display")
+bool removeLoss = input.bool(true, "Hide stopped-out setups", group = "Display")
+int entryMinutes = input.int(15, "Entry extension (minutes)", minval = 0, maxval = 120, group = "Display")
+bool showSizing = input.bool(true, "Show contract sizing", group = "Entry style")
+float riskUsd = input.float(350, "Risk ($)", minval = 1, group = "Entry style")
+color longColor = input.color(#2962FF, "Long", inline = "c", group = "Entry style")
+color shortColor = input.color(#F23645, "Short", inline = "c", group = "Entry style")
+bool showTp1 = input.bool(true, "TP1 (1R)", group = "Target")
+bool showSweep = input.bool(true, "Sweep mark", group = "Liquidity sweep")
+color sweepColor = input.color(#000000, "Color", group = "Liquidity sweep")
+string sweepStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], group = "Liquidity sweep")
+int sweepWidth = input.int(1, "Width", minval = 1, maxval = 4, group = "Liquidity sweep")
+string sweepSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Liquidity sweep")
+color breakerBull = input.color(color.new(#66BB6A, 85), "Bullish fill", group = "Breaker")
+color breakerBear = input.color(color.new(#F23645, 85), "Bearish fill", group = "Breaker")
+bool breakerBorder = input.bool(false, "Border", group = "Breaker")
+color gapFill = input.color(color.new(#787B86, 80), "Fill", group = "FVG")
+bool gapBorder = input.bool(false, "Border", group = "FVG")
+bool showPending = input.bool(false, "Pending overlaps", group = "Display")
+int tailMinutes = input.int(1, "Past last touch (minutes)", minval = 0, maxval = 30, group = "Display")
+bool showPanel = input.bool(false, "Panel", group = "Panel")
+bool compact = input.bool(true, "Compact", group = "Panel")
+
+bool zoneOn = input.bool(false, "Show", inline = "a", group = "Overlap")
+color zoneColor = input.color(#000000, "Color", inline = "a", group = "Overlap")
+string zoneStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], inline = "b", group = "Overlap")
+int zoneWidth = input.int(1, "Width", minval = 1, maxval = 4, inline = "b", group = "Overlap")
+string zoneSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Overlap")
+bool ceOn = input.bool(false, "Show", inline = "a", group = "Overlap CE")
+color ceColor = input.color(#000000, "Color", inline = "a", group = "Overlap CE")
+string ceStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], inline = "b", group = "Overlap CE")
+int ceWidth = input.int(1, "Width", minval = 1, maxval = 4, inline = "b", group = "Overlap CE")
+string ceSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Overlap CE")
+bool breakerOn = input.bool(true, "Show", inline = "a", group = "Breaker")
+color breakerColor = input.color(#000000, "Color", inline = "a", group = "Breaker")
+string breakerStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], inline = "b", group = "Breaker")
+int breakerWidth = input.int(1, "Width", minval = 1, maxval = 4, inline = "b", group = "Breaker")
+string breakerSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Breaker")
+bool fvgOn = input.bool(true, "Show", inline = "a", group = "FVG")
+color fvgColor = input.color(#000000, "Color", inline = "a", group = "FVG")
+string fvgStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], inline = "b", group = "FVG")
+int fvgWidth = input.int(1, "Width", minval = 1, maxval = 4, inline = "b", group = "FVG")
+string fvgSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "FVG")
+bool structureOn = input.bool(true, "Show", inline = "a", group = "Structure break")
+color structureColor = input.color(#000000, "Color", inline = "a", group = "Structure break")
+string structureStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], inline = "b", group = "Structure break")
+int structureWidth = input.int(1, "Width", minval = 1, maxval = 4, inline = "b", group = "Structure break")
+string structureSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Structure break")
+bool entryOn = input.bool(true, "Show", inline = "a", group = "Confirmation")
+string entryStyle = input.string("Solid", "Style", options = ["Dotted", "Dashed", "Solid"], inline = "b", group = "Confirmation")
+int entryWidth = input.int(2, "Width", minval = 1, maxval = 4, inline = "b", group = "Confirmation")
+string entrySize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Confirmation")
+bool stopOn = input.bool(true, "Show", inline = "a", group = "Stop")
+color stopColor = input.color(#000000, "Color", inline = "a", group = "Stop")
+string stopStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], inline = "b", group = "Stop")
+int stopWidth = input.int(1, "Width", minval = 1, maxval = 4, inline = "b", group = "Stop")
+string stopSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Stop")
+bool targetOn = input.bool(true, "Show", inline = "a", group = "Target")
+color targetColor = input.color(#000000, "Color", inline = "a", group = "Target")
+string targetStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], inline = "b", group = "Target")
+int targetWidth = input.int(1, "Width", minval = 1, maxval = 4, inline = "b", group = "Target")
+string targetSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Target")
+
+f_style(string s) =>
+    s == "Solid" ? line.style_solid : s == "Dashed" ? line.style_dashed : line.style_dotted
+
+f_size(string s) =>
+    s == "Huge" ? size.huge : s == "Large" ? size.large : s == "Normal" ? size.normal : s == "Small" ? size.small : size.tiny
+
+type Swing
+    int side
+    float price
+    int stamp
+    float blockHi
+    float blockLo
+    int blockTime
+
+type Seed
+    int side
+    float level
+    int levelTime
+    float extreme
+    int sweepTime
+    float blockHi
+    float blockLo
+    int blockTime
+    int broken = na
+    float sweptLevel = na
+    int sweptTime = na
+
+type Setup
+    int side
+    float zoneHi
+    float zoneLo
+    float blockHi
+    float blockLo
+    int blockTime
+    float gapHi
+    float gapLo
+    int gapTime
+    float level
+    int levelTime
+    int breakTime
+    float extreme
+    int born
+    int lastTouch
+    int state = 1
+    float entryPrice = na
+    float stopPrice = na
+    float targetPrice = na
+    int entryTime = na
+    int endTime = na
+    int entryBarTime = na
+    int tp1Time = na
+    float sweptLevel = na
+    int sweptTime = na
+    int sweepTime = na
+
+var array<Swing> swings = array.new<Swing>()
+var array<Seed> seeds = array.new<Seed>()
+var array<Setup> setups = array.new<Setup>()
+var array<line> drawnLines = array.new<line>()
+var array<label> drawnLabels = array.new<label>()
+var array<box> drawnBoxes = array.new<box>()
+
+f_line(int leftTime, int rightTime, float price, string caption, color col, string styleName, int width, string labelSize, bool pending, string tip, bool rightLabel = false) =>
+    color ink = col
+    ink := color.new(ink, pending ? 70 : 0)
+    int finish = math.max(leftTime + 1, rightTime)
+    array.push(drawnLines, line.new(leftTime, price, finish, price, xloc = xloc.bar_time, color = ink, style = pending ? line.style_dashed : f_style(styleName), width = width))
+    array.push(drawnLabels, label.new(rightLabel ? finish : int(math.avg(leftTime, finish)), price, caption, xloc = xloc.bar_time, style = rightLabel ? label.style_label_left : label.style_none, color = color.new(ink, 100), textcolor = ink, size = f_size(labelSize), text_font_family = font.family_monospace, tooltip = tip))
+
+float tfSeconds = timeframe.in_seconds()
+int strength = int(math.max(1, math.ceil(swingMinutes * 60.0 / tfSeconds)))
+bool eligible = chart.is_standard and timeframe.isintraday and tfSeconds <= timeframe.in_seconds(maxTf) and strength <= 500
+int safeStrength = math.min(strength, 500)
+float ph = ta.pivothigh(high, safeStrength, safeStrength)
+float pl = ta.pivotlow(low, safeStrength, safeStrength)
+float atr = ta.atr(14)
+bool inSession = not sessionFilter or not na(time(timeframe.period, entrySession, "America/New_York"))
+int tailMs = tailMinutes * 60000
+int days = lookback == "1 Day" ? 1 : lookback == "1 Week" ? 7 : 30
+int cutoff = lookback == "Max" ? 0 : last_bar_time - days * 86400000
+
+var float upHi = na
+var float upLo = na
+var int upTime = na
+var float dnHi = na
+var float dnLo = na
+var int dnTime = na
+if barstate.isconfirmed
+    if close > open
+        upHi := breakerRange == "Body" ? close : high
+        upLo := breakerRange == "Body" ? open : low
+        upTime := time
+    if close < open
+        dnHi := breakerRange == "Body" ? open : high
+        dnLo := breakerRange == "Body" ? close : low
+        dnTime := time
+
+bool longSignal = false
+bool shortSignal = false
+var string lastEvent = "Waiting for sweep structure"
+
+if barstate.isconfirmed and eligible
+    if not na(ph) != not na(pl)
+        int side = not na(ph) ? 1 : -1
+        float px = side == 1 ? ph : pl
+        Swing sw = Swing.new(side, px, time[safeStrength], side == 1 ? upHi[safeStrength] : dnHi[safeStrength], side == 1 ? upLo[safeStrength] : dnLo[safeStrength], side == 1 ? upTime[safeStrength] : dnTime[safeStrength])
+        bool changed = false
+        if array.size(swings) == 0
+            array.push(swings, sw)
+            changed := true
+        else
+            Swing prev = array.last(swings)
+            if prev.side != side
+                array.push(swings, sw)
+                changed := true
+            else if side * px > side * prev.price
+                array.set(swings, array.size(swings) - 1, sw)
+                changed := true
+        if array.size(swings) > 3
+            array.shift(swings)
+        if changed and array.size(swings) == 3
+            Swing a = array.get(swings, 0)
+            Swing b = array.get(swings, 1)
+            Swing c = array.get(swings, 2)
+            int tradeSide = -c.side
+            bool sweep = c.side * c.price > c.side * a.price
+            bool allowed = direction == "Both" or (tradeSide == 1 ? direction == "Long only" : direction == "Short only")
+            bool validBlock = not na(b.blockTime) and b.blockTime > a.stamp and b.blockTime <= b.stamp and b.blockHi > b.blockLo
+            if sweep and allowed and validBlock
+                if array.size(seeds) > 0
+                    for i = array.size(seeds) - 1 to 0
+                        if array.get(seeds, i).side == tradeSide
+                            array.remove(seeds, i)
+                array.push(seeds, Seed.new(tradeSide, b.price, b.stamp, c.price, c.stamp, b.blockHi, b.blockLo, b.blockTime))
+                Seed latestSeed = array.last(seeds)
+                latestSeed.sweptLevel := a.price
+                latestSeed.sweptTime := a.stamp
+                lastEvent := tradeSide == 1 ? "Sell-side swept; waiting for break" : "Buy-side swept; waiting for break"
+
+    if array.size(setups) > 0
+        for i = array.size(setups) - 1 to 0
+            Setup s = array.get(setups, i)
+            if s.state == 1
+                bool expired = time_close > s.born + retestMinutes * 60000
+                bool invalid = s.side == 1 ? low < s.zoneLo or low <= s.extreme : high > s.zoneHi or high >= s.extreme
+                bool touch = low <= s.zoneHi and high >= s.zoneLo
+                bool rejection = s.side == 1 ? close > s.zoneHi and close > open : close < s.zoneLo and close < open
+                if expired or invalid
+                    array.remove(setups, i)
+                    lastEvent := expired ? "Pending overlap expired" : "Pending overlap invalidated"
+                else if time_close > s.born and touch
+                    s.lastTouch := time_close
+                    if rejection
+                        if inSession
+                            s.state := 2
+                            s.entryPrice := close
+                            s.stopPrice := s.extreme - s.side * stopTicks * syminfo.mintick
+                            s.targetPrice := close + s.side * math.abs(close - s.stopPrice) * reward
+                            s.entryTime := time_close
+                            s.entryBarTime := time
+                            longSignal := longSignal or s.side == 1
+                            shortSignal := shortSignal or s.side == -1
+                            lastEvent := s.side == 1 ? "UNI+ confirmed" : "UNI- confirmed"
+                        else
+                            array.remove(setups, i)
+                            lastEvent := "Retest blocked by NY session; spent"
+            else if s.state == 2 and time_close > s.entryTime
+                bool stopped = s.side == 1 ? low <= s.stopPrice : high >= s.stopPrice
+                bool targeted = s.side == 1 ? high >= s.targetPrice : low <= s.targetPrice
+                if low <= s.zoneHi and high >= s.zoneLo
+                    s.lastTouch := time_close
+                float firstTarget = s.entryPrice + s.side * math.abs(s.entryPrice - s.stopPrice)
+                bool touchedFirst = s.side == 1 ? high >= firstTarget : low <= firstTarget
+                if na(s.tp1Time) and touchedFirst and not stopped
+                    s.tp1Time := time_close
+                if stopped or targeted
+                    s.state := stopped ? 4 : 3
+                    s.endTime := time_close
+            if s.state != 1 and s.born < cutoff
+                array.remove(setups, i)
+
+    if array.size(seeds) > 0
+        for i = array.size(seeds) - 1 to 0
+            Seed seed = array.get(seeds, i)
+            bool invalid = seed.side == 1 ? low <= seed.extreme : high >= seed.extreme
+            bool expired = na(seed.broken) ? time_close > seed.sweepTime + seedMinutes * 60000 : time_close > seed.broken + gapMinutes * 60000
+            if invalid or expired
+                array.remove(seeds, i)
+            else
+                bool broke = seed.side == 1 ? close > math.max(seed.level, seed.blockHi) : close < math.min(seed.level, seed.blockLo)
+                if na(seed.broken) and broke
+                    seed.broken := time_close
+                    lastEvent := "Structure broken; waiting for overlap"
+                if not na(seed.broken)
+                    bool gap = seed.side == 1 ? low - high[2] >= minGapTicks * syminfo.mintick : low[2] - high >= minGapTicks * syminfo.mintick
+                    bool drive = seed.side * (close[1] - open[1]) > 0 and math.abs(close[1] - open[1]) >= atr[2] * displacement
+                    bool sameLeg = time[2] >= seed.sweepTime and time_close >= seed.broken
+                    if gap and drive and sameLeg
+                        float gapHi = seed.side == 1 ? low : low[2]
+                        float gapLo = seed.side == 1 ? high[2] : high
+                        float zoneHi = math.min(seed.blockHi, gapHi)
+                        float zoneLo = math.max(seed.blockLo, gapLo)
+                        bool leftZone = seed.side == 1 ? close > zoneHi : close < zoneLo
+                        if zoneHi - zoneLo >= syminfo.mintick and leftZone
+                            if array.size(setups) > 0
+                                for j = array.size(setups) - 1 to 0
+                                    Setup older = array.get(setups, j)
+                                    if older.state == 1 and older.side == seed.side
+                                        array.remove(setups, j)
+                            array.push(setups, Setup.new(seed.side, zoneHi, zoneLo, seed.blockHi, seed.blockLo, seed.blockTime, gapHi, gapLo, time[2], seed.level, seed.levelTime, seed.broken, seed.extreme, time_close, time_close))
+                            array.remove(seeds, i)
+                            Setup latestSetup = array.last(setups)
+                            latestSetup.sweptLevel := seed.sweptLevel
+                            latestSetup.sweptTime := seed.sweptTime
+                            latestSetup.sweepTime := seed.sweepTime
+                            lastEvent := "Overlap ready; waiting for retest"
+
+if barstate.islast
+    if array.size(drawnLines) > 0
+        for ln in drawnLines
+            line.delete(ln)
+        array.clear(drawnLines)
+    if array.size(drawnLabels) > 0
+        for lb in drawnLabels
+            label.delete(lb)
+        array.clear(drawnLabels)
+    if array.size(drawnBoxes) > 0
+        for bx in drawnBoxes
+            box.delete(bx)
+        array.clear(drawnBoxes)
+    int shown = 0
+    if eligible and array.size(setups) > 0
+        for i = array.size(setups) - 1 to 0
+            Setup s = array.get(setups, i)
+            bool pending = s.state == 1
+            if shown < maxVisible and s.born >= cutoff and (not pending or showPending) and (not removeLoss or s.state != 4)
+                shown += 1
+                int zoneEnd = s.lastTouch + tailMs
+                int tradeEnd = nz(s.endTime, time_close)
+                int entryStart = nz(s.entryBarTime, s.born)
+                int entryEnd = nz(s.entryTime, s.born) + entryMinutes * 60000
+                float riskPoints = math.abs(s.entryPrice - s.stopPrice)
+                float perContract = riskPoints * syminfo.pointvalue
+                int contracts = not na(perContract) and perContract > 0 ? int(math.floor(riskUsd / perContract)) : 0
+                color entryInk = s.side == 1 ? longColor : shortColor
+                string tag = s.side == 1 ? "UNI+" : "UNI-"
+                string sizing = showSizing ? " " + str.tostring(contracts) + (contracts == 1 ? " contract" : " contracts") + " = $" + str.tostring(contracts * perContract, "#") : ""
+                string outcome = pending ? "Pending" : s.state == 2 ? "Active" : s.state == 3 ? "Target touched" : "Stop touched (stop wins if both)"
+                string tip = "ICT Unicorn Model+ · " + (s.side == 1 ? "Long" : "Short") + "\n" + outcome + "\nEntry " + str.tostring(s.entryPrice, format.mintick) + "\nStop " + str.tostring(s.stopPrice, format.mintick) + "\nTarget " + str.tostring(s.targetPrice, format.mintick) + " · " + str.tostring(reward) + "R\nSizing excludes commissions and slippage."
+                if pending
+                    if entryOn
+                        f_line(s.born, zoneEnd, s.side == 1 ? s.zoneHi : s.zoneLo, tag + " pending", entryInk, "Dashed", entryWidth, entrySize, true, "Waiting for closed-bar rejection", true)
+                else
+                    if entryOn
+                        f_line(entryStart, entryEnd, s.entryPrice, tag + sizing, entryInk, entryStyle, entryWidth, entrySize, false, tip, true)
+                    if stopOn
+                        f_line(entryStart, tradeEnd, s.stopPrice, "SL", stopColor, stopStyle, stopWidth, stopSize, false, tip, true)
+                    if targetOn
+                        f_line(entryStart, tradeEnd, s.targetPrice, "TP2 " + str.tostring(reward) + "R", targetColor, targetStyle, targetWidth, targetSize, false, tip, true)
+                        if showTp1 and reward > 1
+                            f_line(entryStart, nz(s.tp1Time, tradeEnd), s.entryPrice + s.side * riskPoints, "TP1", targetColor, targetStyle, targetWidth, targetSize, false, tip, true)
+                    if showSweep and not na(s.sweptTime)
+                        f_line(s.sweptTime, s.sweepTime, s.sweptLevel, "$$$", sweepColor, sweepStyle, sweepWidth, sweepSize, false, tip)
+                if displayMode == "Full"
+                    int contextEnd = pending ? zoneEnd : s.lastTouch
+                    if zoneOn
+                        f_line(s.born, zoneEnd, s.zoneHi, "UNI", zoneColor, zoneStyle, zoneWidth, zoneSize, pending, tip, true)
+                        f_line(s.born, zoneEnd, s.zoneLo, "", zoneColor, zoneStyle, zoneWidth, zoneSize, pending, tip)
+                    if ceOn
+                        f_line(s.born, zoneEnd, math.avg(s.zoneHi, s.zoneLo), "CE", ceColor, ceStyle, ceWidth, ceSize, pending, tip, true)
+                    if breakerOn
+                        color blockFill = s.side == 1 ? breakerBull : breakerBear
+                        array.push(drawnBoxes, box.new(s.blockTime, s.blockHi, contextEnd, s.blockLo, xloc = xloc.bar_time, bgcolor = blockFill, border_color = breakerBorder ? breakerColor : na, border_width = breakerWidth, border_style = f_style(breakerStyle), text = "BRK", text_color = breakerColor, text_size = f_size(breakerSize), text_halign = text.align_right, text_valign = text.align_bottom, text_font_family = font.family_monospace))
+                    if fvgOn
+                        array.push(drawnBoxes, box.new(s.gapTime, s.gapHi, contextEnd, s.gapLo, xloc = xloc.bar_time, bgcolor = gapFill, border_color = gapBorder ? fvgColor : na, border_width = fvgWidth, border_style = f_style(fvgStyle), text = "FVG", text_color = fvgColor, text_size = f_size(fvgSize), text_halign = text.align_right, text_valign = text.align_top, text_font_family = font.family_monospace))
+                    if structureOn
+                        f_line(s.levelTime, s.breakTime, s.level, "MSS", structureColor, structureStyle, structureWidth, structureSize, pending, tip)
+
+var table panel = table.new(position.top_right, 2, 4, border_width = 0)
+if barstate.islast
+    table.clear(panel, 0, 0, 1, 3)
+    if showPanel
+        string status = not chart.is_standard ? "Use standard candles" : not eligible ? "Timeframe outside limit" : lastEvent
+        table.cell(panel, 0, 0, "UNICORN+", text_color = color.black, text_size = size.small, text_halign = text.align_left, text_formatting = text.format_bold, text_font_family = font.family_monospace)
+        table.cell(panel, 1, 0, eligible ? "READY" : "HIDDEN", text_color = color.black, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+        table.cell(panel, 0, 1, "State", text_color = color.gray, text_size = size.tiny)
+        table.cell(panel, 1, 1, status, text_color = color.black, bgcolor = color.new(color.gray, 94), text_size = size.tiny)
+        if not compact
+            table.cell(panel, 0, 2, "Sequence", text_color = color.gray, text_size = size.tiny)
+            table.cell(panel, 1, 2, "Sweep > MSS > BRK/FVG > retest", text_color = color.black, text_size = size.tiny)
+            table.cell(panel, 0, 3, "Swings", text_color = color.gray, text_size = size.tiny)
+            table.cell(panel, 1, 3, str.tostring(safeStrength * tfSeconds / 60) + "m per side; confirmed only", text_color = color.black, text_size = size.tiny)
+
+alertcondition(longSignal, "ICT Unicorn Model — Long", "UNI+ confirmed | {{ticker}} | {{interval}} | close {{close}}")
+alertcondition(shortSignal, "ICT Unicorn Model — Short", "UNI- confirmed | {{ticker}} | {{interval}} | close {{close}}")
