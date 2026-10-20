@@ -1,0 +1,286 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+indicator("CRT Turtle Soup+", "CRT TS+", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+const string NY = "America/New_York"
+const string gM = "Model"
+const string gR = "Risk"
+const string gW = "Window"
+const string gD = "Display"
+const string gE = "Entry style"
+const string gL = "Level style"
+
+crtTf = input.timeframe("60", "CRT timeframe", group = gM, tooltip = "The candle whose high or low gets swept.")
+useLong = input.bool(true, "Longs", group = gM, inline = "s")
+useShort = input.bool(true, "Shorts", group = gM, inline = "s")
+
+bufTicks = input.int(2, "Stop buffer (ticks)", minval = 0, group = gR)
+maxStop = input.float(0, "Max stop (points)", minval = 0, group = gR, tooltip = "0 = no limit.")
+minRR = input.float(1.5, "Min R to far side", minval = 0.5, step = 0.25, group = gR)
+riskUsd = input.float(350, "Risk ($)", minval = 1, group = gR)
+maxTrades = input.int(3, "Max trades per day", minval = 1, maxval = 10, group = gR)
+beAfter = input.bool(true, "Move stop to BE once TP1 hits", group = gR)
+delOut = input.bool(true, "Delete stopped-out setups", group = gR, tooltip = "Removes setups that hit their stop before TP1.")
+
+limitWin = input.bool(false, "Limit to window", group = gW)
+win = input.session("0200-1600", "Window (NY)", group = gW)
+
+disp = input.string("Minimal", "Display", options = ["Minimal", "Full"], group = gD, tooltip = "Full adds the live CRT range, its 50% and the CISD line.")
+showPend = input.bool(false, "Pending setup preview", group = gD)
+aMark = input.bool(true, "Mark A-grade", group = gD, tooltip = "● when the sweep also took PDH or PDL.")
+maxVis = input.int(10, "Max visible", minval = 1, maxval = 50, group = gD)
+extMin = input.int(15, "Entry extension (minutes)", minval = 0, maxval = 120, group = gD)
+
+cLong = input.color(#2962FF, "Long", group = gE, inline = "c")
+cShort = input.color(#F23645, "Short", group = gE, inline = "c")
+cBe = input.color(#FF9800, "BE", group = gE, inline = "c")
+eWidth = input.int(2, "Width", minval = 1, maxval = 4, group = gE, inline = "e")
+eSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gE, inline = "e")
+
+cInk = input.color(#000000, "Color", group = gL, inline = "k")
+lvStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], group = gL, inline = "k")
+lvW = input.int(1, "Width", minval = 1, maxval = 4, group = gL, inline = "w")
+lvSize = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gL, inline = "w")
+
+type Trade
+    bool lng
+    float entry
+    float stop
+    float tp1
+    float tp2
+    bool hit1
+    bool live
+    bool out
+    array<line> ext
+    array<label> extL
+    array<line> fixed
+    array<label> fixedL
+
+float tick = syminfo.mintick
+color ink = cInk
+
+if timeframe.in_seconds() >= timeframe.in_seconds(crtTf)
+    runtime.error("Chart timeframe must be below the CRT timeframe.")
+
+f_style(string s) =>
+    s == "Dotted" ? line.style_dotted : s == "Dashed" ? line.style_dashed : line.style_solid
+
+f_size(string s) =>
+    switch s
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+        "Large" => size.large
+        => size.huge
+
+f_px(float v) =>
+    str.tostring(v, format.mintick)
+
+method wipe(Trade tr) =>
+    for l in tr.ext
+        line.delete(l)
+    for b in tr.extL
+        label.delete(b)
+    for l in tr.fixed
+        line.delete(l)
+    for b in tr.fixedL
+        label.delete(b)
+
+method stretch(Trade tr, int t) =>
+    for i = 0 to tr.ext.size() - 1
+        line.set_x2(tr.ext.get(i), t)
+        label.set_x(tr.extL.get(i), t)
+
+f_lvl(Trade tr, float y, string txt, color c) =>
+    tr.ext.push(line.new(time, y, time_close, y, xloc = xloc.bar_time, color = c, style = f_style(lvStyle), width = lvW))
+    tr.extL.push(label.new(time_close, y, txt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(c, 100), textcolor = c, size = f_size(lvSize), text_font_family = font.family_monospace))
+
+f_open(bool lng, float stop, float tp1, float tp2, bool aGrade, float swept, int tRange, int tSweep) =>
+    Trade tr = Trade.new(lng, close, stop, tp1, tp2, false, true, false, array.new<line>(), array.new<label>(), array.new<line>(), array.new<label>())
+    float risk = math.abs(close - stop)
+    float per = risk * syminfo.pointvalue
+    int n = per > 0 ? math.max(1, math.floor(riskUsd / per)) : 1
+    color c = lng ? cLong : cShort
+    string tag = lng ? "CRT+" : "CRT-"
+    string txt = tag + " " + str.tostring(n) + (n == 1 ? " contract" : " contracts") + " = $" + str.tostring(n * per, "#") + (aGrade ? " ●" : "")
+    string note = "CRT Turtle Soup+ · " + (lng ? "Long" : "Short") + "\nEntry " + f_px(close) + "\nStop " + f_px(stop) + (na(tp1) ? "" : "\nTP1 " + f_px(tp1)) + "\nTP2 " + f_px(tp2) + " · " + str.tostring(math.abs(tp2 - close) / risk, "#.#") + "R"
+    int right = time_close + extMin * 60000
+    tr.fixed.push(line.new(time, close, right, close, xloc = xloc.bar_time, color = c, style = line.style_solid, width = eWidth))
+    tr.fixedL.push(label.new(right, close, txt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(c, 100), textcolor = c, size = f_size(eSize), text_font_family = font.family_monospace, tooltip = note))
+    tr.fixed.push(line.new(tRange, swept, tSweep, swept, xloc = xloc.bar_time, color = ink, style = f_style(lvStyle), width = lvW))
+    tr.fixedL.push(label.new(int(tRange + (tSweep - tRange) / 2), swept, "$$$", xloc = xloc.bar_time, style = lng ? label.style_label_up : label.style_label_down, color = color.new(ink, 100), textcolor = ink, size = f_size(lvSize), text_font_family = font.family_monospace))
+    f_lvl(tr, stop, "SL", ink)
+    if not na(tp1)
+        f_lvl(tr, tp1, "TP1", ink)
+    f_lvl(tr, tp2, "TP2", ink)
+    tr
+
+[pH, pL, pT, cT] = request.security(syminfo.tickerid, crtTf, [high[1], low[1], time[1], time], lookahead = barmerge.lookahead_on)
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+
+bool newHtf = cT != cT[1]
+bool newDay = time_tradingday != nz(time_tradingday[1])
+bool inWin = not limitWin or not na(time(timeframe.period, win, NY))
+
+var array<Trade> trades = array.new<Trade>()
+var float rH = na
+var float rL = na
+var int rT = na
+var float upOpen = na
+var float dnOpen = na
+var float exH = na
+var float exL = na
+var int exHT = na
+var int exLT = na
+var float cisdS = na
+var float cisdL = na
+var bool usedS = false
+var bool usedL = false
+var int dayCount = 0
+var bool sigL = false
+var bool sigS = false
+
+sigL := false
+sigS := false
+
+if barstate.isconfirmed
+    if newDay
+        dayCount := 0
+
+    bool busy = false
+    for tr in trades
+        if tr.live
+            bool endIt = newDay
+            if not endIt
+                if tr.lng
+                    if low <= tr.stop
+                        endIt := true
+                        tr.out := not tr.hit1
+                    else
+                        if not tr.hit1 and not na(tr.tp1) and high >= tr.tp1
+                            tr.hit1 := true
+                            if beAfter
+                                tr.stop := tr.entry
+                                tr.fixed.push(tr.ext.shift())
+                                tr.fixedL.push(tr.extL.shift())
+                                f_lvl(tr, tr.entry, "BE", cBe)
+                        if high >= tr.tp2
+                            endIt := true
+                else
+                    if high >= tr.stop
+                        endIt := true
+                        tr.out := not tr.hit1
+                    else
+                        if not tr.hit1 and not na(tr.tp1) and low <= tr.tp1
+                            tr.hit1 := true
+                            if beAfter
+                                tr.stop := tr.entry
+                                tr.fixed.push(tr.ext.shift())
+                                tr.fixedL.push(tr.extL.shift())
+                                f_lvl(tr, tr.entry, "BE", cBe)
+                        if low <= tr.tp2
+                            endIt := true
+            tr.stretch(time_close)
+            if endIt
+                tr.live := false
+            else
+                busy := true
+
+    if delOut and trades.size() > 0
+        for i = trades.size() - 1 to 0
+            Trade tr = trades.get(i)
+            if tr.out
+                tr.wipe()
+                trades.remove(i)
+
+    if newHtf
+        rH := pH
+        rL := pL
+        rT := pT
+        exH := na
+        exL := na
+        cisdS := na
+        cisdL := na
+        usedS := false
+        usedL := false
+
+    if close > open and not (close[1] > open[1])
+        upOpen := open
+    if close < open and not (close[1] < open[1])
+        dnOpen := open
+
+    if not na(rH) and high > rH and (na(exH) or high > exH)
+        exH := high
+        exHT := time
+        cisdS := nz(upOpen, open)
+    if not na(rL) and low < rL and (na(exL) or low < exL)
+        exL := low
+        exLT := time
+        cisdL := nz(dnOpen, open)
+
+    if useShort and not usedS and not na(cisdS) and close < cisdS and close < rH and close > rL
+        float stp = exH + bufTicks * tick
+        float risk = stp - close
+        float mid = (rH + rL) / 2
+        bool ok = risk > 0 and (close - rL) / risk >= minRR and (maxStop == 0 or risk <= maxStop) and inWin and dayCount < maxTrades and not busy
+        if ok
+            trades.push(f_open(false, stp, mid < close - tick ? mid : na, rL, aMark and exH > pdh and close < pdh, rH, rT, exHT))
+            usedS := true
+            busy := true
+            dayCount += 1
+            sigS := true
+            alert("CRT Turtle Soup+ — Short " + syminfo.ticker + " @ " + f_px(close), alert.freq_once_per_bar_close)
+        cisdS := na
+
+    if useLong and not usedL and not na(cisdL) and close > cisdL and close > rL and close < rH
+        float stp = exL - bufTicks * tick
+        float risk = close - stp
+        float mid = (rH + rL) / 2
+        bool ok = risk > 0 and (rH - close) / risk >= minRR and (maxStop == 0 or risk <= maxStop) and inWin and dayCount < maxTrades and not busy
+        if ok
+            trades.push(f_open(true, stp, mid > close + tick ? mid : na, rH, aMark and exL < pdl and close > pdl, rL, rT, exLT))
+            usedL := true
+            busy := true
+            dayCount += 1
+            sigL := true
+            alert("CRT Turtle Soup+ — Long " + syminfo.ticker + " @ " + f_px(close), alert.freq_once_per_bar_close)
+        cisdL := na
+
+    while trades.size() > maxVis
+        trades.shift().wipe()
+
+var array<line> liveLn = array.new<line>()
+var array<label> liveL = array.new<label>()
+
+f_live(int t1, float y, string txt, color c, string sty) =>
+    int t2 = time_close + extMin * 60000
+    liveLn.push(line.new(t1, y, t2, y, xloc = xloc.bar_time, color = c, style = f_style(sty), width = lvW))
+    liveL.push(label.new(t2, y, txt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(c, 100), textcolor = c, size = f_size(lvSize), text_font_family = font.family_monospace))
+
+if barstate.islast
+    for l in liveLn
+        line.delete(l)
+    for b in liveL
+        label.delete(b)
+    liveLn.clear()
+    liveL.clear()
+    if disp == "Full" and not na(rH)
+        f_live(rT, rH, "CRT H", ink, lvStyle)
+        f_live(rT, rL, "CRT L", ink, lvStyle)
+        f_live(rT, (rH + rL) / 2, "CRT 50%", color.new(ink, 50), lvStyle)
+        if not na(cisdS) and not usedS
+            f_live(exHT, cisdS, "CISD", ink, lvStyle)
+        if not na(cisdL) and not usedL
+            f_live(exLT, cisdL, "CISD", ink, lvStyle)
+    if showPend
+        if useShort and not na(cisdS) and not usedS and cisdS < rH and cisdS > rL
+            float r = exH + bufTicks * tick - cisdS
+            if r > 0 and (cisdS - rL) / r >= minRR and (maxStop == 0 or r <= maxStop)
+                f_live(exHT, cisdS, "CRT- pending", color.new(cShort, 60), "Solid")
+        if useLong and not na(cisdL) and not usedL and cisdL > rL and cisdL < rH
+            float r = cisdL - exL + bufTicks * tick
+            if r > 0 and (rH - cisdL) / r >= minRR and (maxStop == 0 or r <= maxStop)
+                f_live(exLT, cisdL, "CRT+ pending", color.new(cLong, 60), "Solid")
+
+alertcondition(sigL, "CRT Turtle Soup+ — Long", "CRT Turtle Soup+ — Long {{ticker}} @ {{close}}")
+alertcondition(sigS, "CRT Turtle Soup+ — Short", "CRT Turtle Soup+ — Short {{ticker}} @ {{close}}")
